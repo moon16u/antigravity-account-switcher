@@ -1100,6 +1100,9 @@ function generateTestTlsCert(commonName = 'oauth2.googleapis.com') {
   const set = (...p) => tlv(0x31, ...p);
   const int = (b) => {
     let buf = Buffer.isBuffer(b) ? b : Buffer.from([b]);
+    let start = 0;
+    while (start < buf.length - 1 && buf[start] === 0) start += 1;
+    if (start > 0) buf = buf.subarray(start);
     if (buf[0] & 0x80) buf = Buffer.concat([Buffer.from([0]), buf]);
     return tlv(0x02, buf);
   };
@@ -1113,7 +1116,9 @@ function generateTestTlsCert(commonName = 'oauth2.googleapis.com') {
   const sanExt = seq(oid('551d11'), tlv(0x04, seq(tlv(0x82, Buffer.from(commonName, 'ascii')))));
   const bcExt = seq(oid('551d13'), tlv(0x01, Buffer.from([0xff])), tlv(0x04, seq(tlv(0x01, Buffer.from([0xff])))));
   const exts = ctx(3, seq(bcExt, sanExt));
-  const tbs = seq(ctx(0, int(2)), int(randomBytes(8)), algId, name, validity, name, spki, exts);
+  const serial = randomBytes(8);
+  serial[0] = (serial[0] & 0x7f) || 1;
+  const tbs = seq(ctx(0, int(2)), int(serial), algId, name, validity, name, spki, exts);
   const sig = cryptoSign('sha256', tbs, privateKey);
   const certDer = seq(tbs, algId, bitStr(sig));
   const certPem =
@@ -1765,7 +1770,12 @@ test('switcher-worker helpers parse Windows tasklist CSV titles (including GBK æ
   );
 
   const storagePath = join(root, 'app_storage.json');
-  assert.equal(readRunInBackgroundSetting({ ANTIGRAVITY_APP_STORAGE_PATH: storagePath }), false);
+  assert.equal(
+    readRunInBackgroundSetting({ ANTIGRAVITY_APP_STORAGE_PATH: storagePath }),
+    process.platform === 'darwin'
+  );
+  assert.equal(readRunInBackgroundSetting({ ANTIGRAVITY_APP_STORAGE_PATH: storagePath }, 'win32'), false);
+  assert.equal(readRunInBackgroundSetting({ ANTIGRAVITY_APP_STORAGE_PATH: storagePath }, 'darwin'), true);
 
   writeFileSync(storagePath, JSON.stringify({ runInBackground: 'true' }), 'utf8');
   assert.equal(readRunInBackgroundSetting({ ANTIGRAVITY_APP_STORAGE_PATH: storagePath }), true);
