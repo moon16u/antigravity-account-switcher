@@ -1,0 +1,7 @@
+*.log
+*.enc.json
+vault.key
+node_modules/
+_tmp_*
+.DS_Store
+Thumbs.db

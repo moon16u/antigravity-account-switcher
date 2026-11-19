@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / Node ${{ matrix.node-version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        node-version: ['20', '24']
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Syntax check (.mjs and app.js)
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module - <<'EOF'
+          import { execFileSync } from 'node:child_process';
+          import { readdirSync } from 'node:fs';
+          import { join } from 'node:path';
+
+          function walkMjs(dir) {
+            const out = [];
+            for (const entry of readdirSync(dir, { withFileTypes: true })) {
+              if (entry.name === 'node_modules' || entry.name === '.git') continue;
+              const full = join(dir, entry.name);
+              if (entry.isDirectory()) out.push(...walkMjs(full));
+              else if (entry.isFile() && entry.name.endsWith('.mjs')) out.push(full);
+            }
+            return out;
+          }
+
+          const files = [...walkMjs('.').sort(), join('sidecars', 'switcher', 'public', 'app.js')];
+          for (const file of files) {
+            console.log(`Checking ${file}`);
+            execFileSync(process.execPath, ['--check', file], { stdio: 'inherit' });
+          }
+          EOF
+
+      - name: Run test suite
+        run: node --test sidecars/switcher/test/switcher.test.mjs
+
+      - name: Run test suite with --use-env-proxy (Node 24)
+        if: matrix.node-version == '24'
+        run: node --use-env-proxy --test sidecars/switcher/test/switcher.test.mjs

@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" fill="none">
+  <defs>
+    <linearGradient id="bg-back" x1="10" y1="18" x2="88" y2="74" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#93C5FD"/>
+      <stop offset="100%" stop-color="#60A5FA"/>
+    </linearGradient>
+    <linearGradient id="bg-front" x1="40" y1="54" x2="118" y2="110" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#2563EB"/>
+      <stop offset="100%" stop-color="#1D4ED8"/>
+    </linearGradient>
+    <clipPath id="clip-back-card">
+      <rect x="10" y="18" width="78" height="56" rx="13"/>
+    </clipPath>
+    <clipPath id="clip-back-avatar">
+      <circle cx="27" cy="40" r="10"/>
+    </clipPath>
+    <clipPath id="clip-front-avatar">
+      <circle cx="59.5" cy="82" r="12"/>
+    </clipPath>
+  </defs>
+
+  <!-- Back account card (upper-left) -->
+  <rect x="10" y="18" width="78" height="56" rx="13" fill="url(#bg-back)" stroke="#3B82F6" stroke-width="1.5"/>
+  <circle cx="27" cy="40" r="10" fill="#EFF6FF"/>
+  <g clip-path="url(#clip-back-avatar)">
+    <circle cx="27" cy="36.5" r="3.3" fill="#3B82F6"/>
+    <circle cx="27" cy="48.8" r="6.8" fill="#3B82F6"/>
+  </g>
+  <rect x="43" y="33.5" width="32" height="5.5" rx="2.75" fill="#EFF6FF"/>
+  <rect x="43" y="43" width="21" height="4.5" rx="2.25" fill="#DBEAFE"/>
+
+  <!-- Cast shadow from front card clipped strictly to back card -->
+  <g clip-path="url(#clip-back-card)">
+    <rect x="36" y="50" width="80" height="58" rx="15" fill="#1E3A8A" fill-opacity="0.26"/>
+  </g>
+
+  <!-- Front active account card (lower-right) -->
+  <rect x="40" y="54" width="78" height="56" rx="13" fill="url(#bg-front)" stroke="#60A5FA" stroke-opacity="0.45" stroke-width="1.5"/>
+  <circle cx="59.5" cy="82" r="12" fill="#FFFFFF"/>
+  <g clip-path="url(#clip-front-avatar)">
+    <circle cx="59.5" cy="77.8" r="3.9" fill="#2563EB"/>
+    <circle cx="59.5" cy="92.5" r="8.2" fill="#2563EB"/>
+  </g>
+  <rect x="78" y="73.5" width="28" height="6" rx="3" fill="#FFFFFF"/>
+  <rect x="78" y="84.5" width="19" height="5" rx="2.5" fill="#BFDBFE"/>
+  <circle cx="107" cy="65" r="4.2" fill="#34D399" stroke="#1E40AF" stroke-width="1.5"/>
+</svg>

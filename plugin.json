@@ -1,0 +1,16 @@
+{
+  "name": "antigravity-account-switcher",
+  "displayName": "Account Switcher",
+  "version": "0.2.0",
+  "description": "Manage multiple local OAuth accounts for Google Antigravity 2.0 across Windows, WSL2, macOS, and Linux with encrypted credential storage and safe account switching.",
+  "license": "MIT",
+  "author": "moon16u",
+  "homepage": "https://github.com/moon16u/antigravity-account-switcher",
+  "repository": "https://github.com/moon16u/antigravity-account-switcher",
+  "logo": "assets/logo.svg",
+  "suggestedPrompts": [
+    "打开账号切换面板",
+    "查看当前已保存的 Antigravity 账号",
+    "帮我切换或新增一个 Antigravity 账号"
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "command": "node",
+  "args": [
+    "main.mjs"
+  ],
+  "restart_policy": "always",
+  "display_name": "Account Switcher",
+  "description": "在 Windows、WSL2、macOS 与 Linux 上管理 Antigravity 2.0 本地多账号 OAuth 凭证并安全切换账号。",
+  "has_web_ui": true,
+  "ui_config": {
+    "display_name": "Account Switcher",
+    "views": [
+      {
+        "path": "/",
+        "entrypoint": "SIDECAR_UI_ENTRYPOINT_AUX_PANE",
+        "title": "Account Switcher"
+      }
+    ]
+  }
+}

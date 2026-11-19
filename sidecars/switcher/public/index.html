@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>账号切换</title>
+  <script src="/preload.js"></script>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <div class="shell">
+    <header class="header">
+      <div class="header-main">
+        <h1 id="app-title" class="title">账号切换</h1>
+        <span id="ls-badge" class="status-chip status-chip-muted">
+          <span class="status-dot" aria-hidden="true"></span>
+          <span id="ls-badge-text">检查中</span>
+        </span>
+      </div>
+      <div class="header-actions">
+        <button id="toggle-lang-btn" type="button" class="btn btn-ghost btn-lang" aria-label="Switch language" title="Switch to English">EN</button>
+        <button id="toggle-reveal-btn" type="button" class="btn btn-icon" aria-label="显示邮箱" title="显示完整邮箱"></button>
+        <button id="refresh-btn" type="button" class="btn btn-icon" aria-label="刷新" title="刷新账号状态"></button>
+      </div>
+    </header>
+
+    <div id="notice" class="notice hidden" role="status" aria-live="polite"></div>
+
+    <section class="card accounts-card" aria-labelledby="saved-heading">
+      <div class="card-head">
+        <div class="card-head-left">
+          <h2 id="saved-heading" class="card-title">已保存账号</h2>
+          <span id="saved-count" class="count-badge">0</span>
+        </div>
+        <button id="oauth-toggle-btn" type="button" class="btn btn-primary">+ 添加账号</button>
+      </div>
+
+      <div id="unsaved-banner" class="unsaved-banner hidden">
+        <div id="unsaved-info" class="unsaved-info"></div>
+        <form id="capture-form" class="inline-form hidden" autocomplete="off">
+          <input
+            id="capture-label"
+            type="text"
+            maxlength="40"
+            placeholder="给当前账号起个备注名（可选，如 主号）"
+            aria-label="当前账号备注名"
+            autocomplete="off"
+          >
+          <button id="capture-btn" type="submit" class="btn btn-primary">保存当前账号</button>
+        </form>
+      </div>
+
+      <div id="oauth-panel" class="oauth-panel hidden">
+        <form id="oauth-form" class="inline-form" autocomplete="off">
+          <input
+            id="oauth-label"
+            type="text"
+            maxlength="40"
+            placeholder="新账号备注名（可选，如 备用1）"
+            aria-label="新账号备注名"
+            autocomplete="off"
+          >
+          <button id="oauth-start-btn" type="submit" class="btn btn-primary">浏览器授权添加</button>
+          <button id="oauth-hide-btn" type="button" class="btn btn-ghost">收起</button>
+        </form>
+
+        <div id="oauth-pending-box" class="confirm-box hidden">
+          <div id="oauth-pending-msg"></div>
+          <input
+            id="oauth-url-preview"
+            type="text"
+            readonly
+            class="url-preview hidden"
+            aria-label="Google OAuth 授权链接"
+          >
+          <div class="confirm-actions">
+            <a id="oauth-link" class="btn btn-primary hidden" target="_blank" rel="noopener noreferrer">打开授权页</a>
+            <button id="oauth-copy-btn" type="button" class="btn btn-secondary">复制授权链接</button>
+            <button id="oauth-cancel-btn" type="button" class="btn btn-ghost">取消授权</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="accounts-list" class="accounts-list"></div>
+    </section>
+
+    <section class="card tools-card" aria-label="高级工具">
+      <details id="fallback-login-details" class="tool-item">
+        <summary id="fallback-summary" class="tool-summary">原生登录（备用）</summary>
+        <div class="tool-body">
+          <div id="fallback-desc" class="tool-desc">
+            浏览器授权受阻时可使用此方式：备份当前账号并退出桌面应用，以未登录状态重开窗口进行原生登录。
+          </div>
+          <div class="tool-actions">
+            <button id="new-login-btn" type="button" class="btn btn-secondary">退出并走原生登录</button>
+          </div>
+          <div id="new-login-confirm" class="confirm-box hidden"></div>
+        </div>
+      </details>
+
+      <details id="logs-details" class="tool-item">
+        <summary id="logs-summary" class="tool-summary">最近切换日志</summary>
+        <div class="tool-body">
+          <pre id="logs-view" class="logs-view">暂无记录</pre>
+        </div>
+      </details>
+    </section>
+
+    <footer id="footer-note" class="footer-note">
+      AES-256-GCM 本地加密保存 · 点击「切换」即可自动备份并重启切换账号
+    </footer>
+  </div>
+</body>
+</html>
