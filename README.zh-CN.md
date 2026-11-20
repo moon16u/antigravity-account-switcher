@@ -9,6 +9,10 @@
 
 适用于 **Google Antigravity 2.0** 的跨平台原生侧栏（`SIDECAR_UI_ENTRYPOINT_AUX_PANE`）多账号管理与切换插件：支持免退出浏览器 OAuth 添加账号、AES-256-GCM 静态加密存储、不切号同步订阅等级与分账号用量查看，以及安全切号重启。基于 **Node.js >= 18** 开发，**零外部 npm 依赖**。
 
+<p align="center">
+  <img src="assets/demo.gif" alt="Antigravity Account Switcher 演示动图" width="560" />
+</p>
+
 ## 支持平台
 
 | 平台 | 运行时标识 | 宿主桌面端与 Language Server | 验证情况 |

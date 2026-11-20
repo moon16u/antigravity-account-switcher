@@ -9,6 +9,10 @@ English | [简体中文](README.zh-CN.md)
 
 A cross-platform auxiliary-pane sidecar plugin (`SIDECAR_UI_ENTRYPOINT_AUX_PANE`) for **Google Antigravity 2.0** that manages multiple local OAuth accounts, encrypts credentials at rest, displays per-account quota usage, and switches accounts cleanly across desktop and WSL2 environments — built on **Node.js >= 18** with **zero external npm dependencies**.
 
+<p align="center">
+  <img src="assets/demo.gif" alt="Antigravity Account Switcher Demo" width="560" />
+</p>
+
 ## Supported Platforms
 
 | Platform | Runtime Mode | Antigravity Host & Language Server | Verification Status |
