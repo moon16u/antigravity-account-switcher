@@ -649,7 +649,14 @@ function formatAutoBackupLabel(date) {
   return `自动备份 (${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())})`;
 }
 
-const CONVERSATION_ID_RE = /^[A-Za-z0-9_-]{8,128}$/;
+export const CONVERSATION_ID_RE = /^[A-Za-z0-9_-]{8,128}$/;
+
+function clampMs(value, fallback, min, max) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return fallback;
+  }
+  return Math.max(min, Math.min(max, Math.round(value)));
+}
 
 export function prepareSwitchJob(
   paths,
@@ -662,6 +669,7 @@ export function prepareSwitchJob(
     context = null,
     delayMs = 0,
     resume = null,
+    waitConversationIdle = null,
   } = {}
 ) {
   if (mode !== 'switch' && mode !== 'new-login') {
@@ -760,6 +768,20 @@ export function prepareSwitchJob(
     }
   }
 
+  let cleanWaitConversationIdle = null;
+  if (waitConversationIdle && typeof waitConversationIdle === 'object' && !Array.isArray(waitConversationIdle)) {
+    const waitCid =
+      typeof waitConversationIdle.conversationId === 'string' ? waitConversationIdle.conversationId.trim() : '';
+    if (CONVERSATION_ID_RE.test(waitCid)) {
+      cleanWaitConversationIdle = {
+        conversationId: waitCid,
+        minDelayMs: clampMs(waitConversationIdle.minDelayMs, 1500, 0, 15_000),
+        maxWaitMs: clampMs(waitConversationIdle.maxWaitMs, 10_000, 1000, 20_000),
+        fallbackDelayMs: clampMs(waitConversationIdle.fallbackDelayMs, 3000, 0, 15_000),
+      };
+    }
+  }
+
   const jobId = randomUUID();
   const jobPath = assertInsideDir(paths.jobsDir, join(paths.jobsDir, `job-${jobId}.enc.json`));
   const jobPayload = {
@@ -770,6 +792,7 @@ export function prepareSwitchJob(
     createdAt: nowIso,
     ...(cleanDelayMs > 0 ? { delayMs: cleanDelayMs } : {}),
     ...(cleanResume ? { resume: cleanResume } : {}),
+    ...(cleanWaitConversationIdle ? { waitConversationIdle: cleanWaitConversationIdle } : {}),
     ...(cleanContext ? { context: cleanContext } : {}),
   };
   const jobEnvelope = encryptPayload(jobPayload, key);

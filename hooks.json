@@ -4,7 +4,7 @@
     "PreInvocation": [
       {
         "type": "command",
-        "command": "node ./scripts/quota-hook.mjs",
+        "command": "node ./scripts/quota-hook.mjs || \"%APPDATA%\\Antigravity\\bin\\agy-node.cmd\" ./scripts/quota-hook.mjs",
         "timeout": 5
       }
     ]

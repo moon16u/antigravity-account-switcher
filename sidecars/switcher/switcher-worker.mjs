@@ -13,6 +13,7 @@ import { homedir, tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { callLsRpc } from './active-work.mjs';
 import {
   buildRelaunchEnv,
   detectRuntime,
@@ -28,6 +29,7 @@ import {
   appendSwitchLog,
   assertInsideDir,
   assertNotSymlink,
+  CONVERSATION_ID_RE,
   decryptPayload,
   getOrCreateKey,
   maskEmail,
@@ -514,8 +516,6 @@ async function stopAntigravityAndWait(paths, env = process.env, runtime = detect
   return stopWindowsOrWslAntigravity(paths, env, runtime);
 }
 
-const CONVERSATION_ID_RE = /^[A-Za-z0-9_-]{8,128}$/;
-
 function isRegularNonSymlinkFile(filePath) {
   if (!filePath || typeof filePath !== 'string') return false;
   try {
@@ -561,6 +561,73 @@ export function resolveAgentApiCommand(
   return null;
 }
 
+export async function waitForConversationIdleBeforeStop(
+  paths,
+  waitCfg,
+  env = process.env,
+  { rpcFn = callLsRpc, delayFn = delay, pollIntervalMs = 400 } = {}
+) {
+  const cid = typeof waitCfg?.conversationId === 'string' ? waitCfg.conversationId.trim() : '';
+  if (!CONVERSATION_ID_RE.test(cid)) {
+    return { settled: false, reason: 'INVALID_CONVERSATION_ID', waitedMs: 0 };
+  }
+
+  const minDelayMs =
+    typeof waitCfg?.minDelayMs === 'number' && Number.isFinite(waitCfg.minDelayMs) && waitCfg.minDelayMs >= 0
+      ? Math.min(15_000, Math.round(waitCfg.minDelayMs))
+      : 1500;
+  const maxWaitMs =
+    typeof waitCfg?.maxWaitMs === 'number' && Number.isFinite(waitCfg.maxWaitMs) && waitCfg.maxWaitMs > 0
+      ? Math.min(20_000, Math.round(waitCfg.maxWaitMs))
+      : 10_000;
+  const fallbackDelayMs =
+    typeof waitCfg?.fallbackDelayMs === 'number' && Number.isFinite(waitCfg.fallbackDelayMs) && waitCfg.fallbackDelayMs >= 0
+      ? Math.min(15_000, Math.round(waitCfg.fallbackDelayMs))
+      : 3000;
+
+  const overallStartedAt = Date.now();
+  if (minDelayMs > 0) {
+    await delayFn(minDelayMs);
+  }
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < maxWaitMs) {
+    const res = await Promise.resolve()
+      .then(() => rpcFn(env, 'GetAllCascadeTrajectories', { timeoutMs: 1500 }))
+      .catch(() => null);
+
+    if (res === null || res === undefined) {
+      const elapsedSoFar = Date.now() - overallStartedAt;
+      const remaining = Math.max(0, fallbackDelayMs - elapsedSoFar);
+      if (remaining > 0) {
+        await delayFn(remaining);
+      }
+      const waitedMs = Date.now() - overallStartedAt;
+      return { settled: false, reason: 'RPC_UNAVAILABLE', waitedMs };
+    }
+
+    if (res.trajectorySummaries && typeof res.trajectorySummaries === 'object' && !Array.isArray(res.trajectorySummaries)) {
+      const entry = Object.prototype.hasOwnProperty.call(res.trajectorySummaries, cid)
+        ? res.trajectorySummaries[cid]
+        : undefined;
+      if (
+        !entry ||
+        (entry.status !== 'CASCADE_RUN_STATUS_RUNNING' && entry.status !== 'CASCADE_RUN_STATUS_BUSY')
+      ) {
+        const waitedMs = Date.now() - overallStartedAt;
+        appendSwitchLog(paths, `TURN_IDLE_BEFORE_STOP cid=${cid} waitedMs=${waitedMs}`);
+        return { settled: true, reason: 'IDLE', waitedMs };
+      }
+    }
+
+    await delayFn(pollIntervalMs);
+  }
+
+  const waitedMs = Date.now() - overallStartedAt;
+  appendSwitchLog(paths, `TURN_IDLE_TIMEOUT cid=${cid} waitedMs=${waitedMs}`);
+  return { settled: false, reason: 'TIMEOUT', waitedMs };
+}
+
 export async function resumeConversationAfterRelaunch(
   paths,
   resume,
@@ -570,6 +637,7 @@ export async function resumeConversationAfterRelaunch(
     runtime = detectRuntime(env),
     timeoutMs = 45_000,
     pollIntervalMs = 1000,
+    postHubReadyDelayMs = 3000,
     discoverFn = discoverLiveHub,
     execFn = execFileSync,
     delayFn = delay,
@@ -606,6 +674,11 @@ export async function resumeConversationAfterRelaunch(
   if (!liveHub || !liveHub.lsAddress || !liveHub.csrfToken) {
     appendSwitchLog(paths, `AUTO_RESUME_FAILED cid=${cid} reason=HUB_DISCOVERY_TIMEOUT`);
     return { ok: false, reason: 'HUB_DISCOVERY_TIMEOUT' };
+  }
+
+  if (typeof postHubReadyDelayMs === 'number' && Number.isFinite(postHubReadyDelayMs) && postHubReadyDelayMs > 0) {
+    appendSwitchLog(paths, `AUTO_RESUME_WAIT_MCP ms=${postHubReadyDelayMs}`);
+    await delayFn(postHubReadyDelayMs);
   }
 
   const sendEnv = {
@@ -720,7 +793,9 @@ export async function runWorker(jobArg, env = process.env, dataDirArg = '') {
     if (!dryRun && job.resume?.conversationId) {
       previousHubPids = snapshotDaemonHubPids(effectiveEnv, { appDataDir: paths.appDataDir });
     }
-    if (!dryRun && delayMs > 0) {
+    if (!dryRun && job.waitConversationIdle?.conversationId) {
+      await waitForConversationIdleBeforeStop(paths, job.waitConversationIdle, effectiveEnv);
+    } else if (!dryRun && delayMs > 0) {
       appendSwitchLog(paths, `DELAY_BEFORE_STOP ms=${delayMs}`);
       await delay(delayMs);
     }

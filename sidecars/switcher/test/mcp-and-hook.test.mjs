@@ -31,8 +31,12 @@ import {
   saveGuardSettings,
   writeQuotaAlertSnapshot,
 } from '../quota-guard.mjs';
-import { resolveAgentApiCommand, resumeConversationAfterRelaunch } from '../switcher-worker.mjs';
-import { importAccount, loadVault, prepareSwitchJob, resolvePaths } from '../vault.mjs';
+import {
+  resolveAgentApiCommand,
+  resumeConversationAfterRelaunch,
+  waitForConversationIdleBeforeStop,
+} from '../switcher-worker.mjs';
+import { decryptPayload, getOrCreateKey, importAccount, loadVault, prepareSwitchJob, resolvePaths } from '../vault.mjs';
 import { createMcpHandlers, parseJsonRpcBuffer } from '../../../scripts/mcp-server.mjs';
 import { evaluateHookInput } from '../../../scripts/quota-hook.mjs';
 
@@ -400,6 +404,7 @@ test('switcher-worker prepareSwitchJob delay/resume and post-relaunch agentapi w
       runtime: 'linux',
       timeoutMs: 2000,
       pollIntervalMs: 5,
+      postHubReadyDelayMs: 0,
       delayFn: async () => {},
       discoverFn: async (_probeEnv, opts) => {
         pollCount += 1;
@@ -631,7 +636,17 @@ test('MCP server handles stdio JSON-RPC, active-work exclusion, pickBest, and ze
   assert.equal(okPayload.ok, true);
   assert.equal(okPayload.targetAccountId, backupAcc.id);
   assert.equal(okPayload.autoResumeScheduled, true);
+  assert.equal(okPayload.message.includes('将在本轮回复完成后（最多 10 秒）自动关闭并重启 Antigravity'), true);
   assert.equal(spawnedJobs.length, 1);
+
+  const encryptedJob = JSON.parse(readFileSync(spawnedJobs[0], 'utf8'));
+  const decryptedJob = decryptPayload(encryptedJob, getOrCreateKey(paths));
+  assert.deepEqual(decryptedJob.waitConversationIdle, {
+    conversationId: 'conv-self',
+    minDelayMs: 1500,
+    maxWaitMs: 10000,
+    fallbackDelayMs: 3000,
+  });
 
   // Real subprocess stdio JSON-RPC test (newline + Content-Length framing)
   const child = spawn(process.execPath, [MCP_SERVER_PATH], {
@@ -871,4 +886,120 @@ test('syncOnboardingLastLoginUsername updates existing onboarding keys safely an
     assert.deepEqual(resSym, { updated: false, reason: 'MISSING_OR_UNSAFE' });
     assert.equal(readFileSync(symlinkTarget, 'utf8'), targetRaw);
   }
+});
+
+test('waitForConversationIdleBeforeStop settles early on IDLE, falls back on RPC unavailable, and clamps job config', async (t) => {
+  const { paths, env } = makeSandbox(t);
+  const acc = importAccount(paths, {
+    credentialText: makeSampleToken('idlecheck@example.com', '1//refresh-idle'),
+    label: 'IdleCheck',
+  });
+
+  // 1. prepareSwitchJob validates & clamps waitConversationIdle bounds
+  const clampedJob = prepareSwitchJob(paths, {
+    mode: 'switch',
+    accountId: acc.id,
+    env,
+    waitConversationIdle: {
+      conversationId: 'conv_clamp_1234',
+      minDelayMs: -50,
+      maxWaitMs: 99999,
+      fallbackDelayMs: 25000,
+    },
+  });
+  const decrypted = decryptPayload(JSON.parse(readFileSync(clampedJob.jobPath, 'utf8')), getOrCreateKey(paths));
+  assert.deepEqual(decrypted.waitConversationIdle, {
+    conversationId: 'conv_clamp_1234',
+    minDelayMs: 0,
+    maxWaitMs: 20000,
+    fallbackDelayMs: 15000,
+  });
+
+  // 2. Invalid conversationId exits immediately
+  const invalidRes = await waitForConversationIdleBeforeStop(paths, { conversationId: 'bad' }, env);
+  assert.deepEqual(invalidRes, { settled: false, reason: 'INVALID_CONVERSATION_ID', waitedMs: 0 });
+
+  // 3. Polls twice RUNNING, settles on 3rd call IDLE
+  let rpcCount = 0;
+  const delays = [];
+  const idleRes = await waitForConversationIdleBeforeStop(
+    paths,
+    { conversationId: 'conv_idle_1234', minDelayMs: 1200, maxWaitMs: 10000, fallbackDelayMs: 3000 },
+    env,
+    {
+      pollIntervalMs: 400,
+      delayFn: async (ms) => {
+        delays.push(ms);
+      },
+      rpcFn: async () => {
+        rpcCount += 1;
+        if (rpcCount < 3) {
+          return { trajectorySummaries: { conv_idle_1234: { status: 'CASCADE_RUN_STATUS_RUNNING' } } };
+        }
+        return { trajectorySummaries: { conv_idle_1234: { status: 'CASCADE_RUN_STATUS_IDLE' } } };
+      },
+    }
+  );
+  assert.equal(idleRes.settled, true);
+  assert.equal(idleRes.reason, 'IDLE');
+  assert.equal(rpcCount, 3);
+  assert.deepEqual(delays, [1200, 400, 400]);
+  const logText = readFileSync(paths.logPath, 'utf8');
+  assert.equal(logText.includes('TURN_IDLE_BEFORE_STOP cid=conv_idle_1234'), true);
+
+  // 4. RPC unavailable falls back safely without throwing
+  const rpcFailDelays = [];
+  const unavailableRes = await waitForConversationIdleBeforeStop(
+    paths,
+    { conversationId: 'conv_rpc_down_1', minDelayMs: 1500, maxWaitMs: 10000, fallbackDelayMs: 3000 },
+    env,
+    {
+      delayFn: async (ms) => {
+        rpcFailDelays.push(ms);
+      },
+      rpcFn: async () => null,
+    }
+  );
+  assert.equal(unavailableRes.settled, false);
+  assert.equal(unavailableRes.reason, 'RPC_UNAVAILABLE');
+  assert.equal(rpcFailDelays[0], 1500);
+  assert.equal(rpcFailDelays.length, 2);
+});
+
+test('resumeConversationAfterRelaunch waits postHubReadyDelayMs after hub discovery before sending message', async (t) => {
+  const { paths, env, root } = makeSandbox(t);
+  const fakeAgentApi = join(root, 'agentapi');
+  writeFileSync(fakeAgentApi, '#!/bin/sh\nexit 0\n');
+
+  const events = [];
+  let pollCount = 0;
+  const res = await resumeConversationAfterRelaunch(
+    paths,
+    { conversationId: 'conv_wait_mcp_1', message: 'Continue after MCP ready', agentApiExe: fakeAgentApi },
+    env,
+    {
+      runtime: 'linux',
+      timeoutMs: 2000,
+      pollIntervalMs: 50,
+      postHubReadyDelayMs: 2750,
+      delayFn: async (ms) => {
+        events.push(`delay:${ms}`);
+      },
+      discoverFn: async () => {
+        pollCount += 1;
+        events.push(`discover:${pollCount}`);
+        if (pollCount < 2) return null;
+        return { lsAddress: 'http://127.0.0.1:45679', csrfToken: 'mcp-ready-csrf', pid: 303 };
+      },
+      execFn: (_bin, args) => {
+        events.push(`exec:${args[0]}`);
+      },
+    }
+  );
+
+  assert.equal(res.ok, true);
+  assert.equal(res.pid, 303);
+  assert.deepEqual(events, ['discover:1', 'delay:50', 'discover:2', 'delay:2750', 'exec:send-message']);
+  const logText = readFileSync(paths.logPath, 'utf8');
+  assert.equal(logText.includes('AUTO_RESUME_WAIT_MCP ms=2750'), true);
 });

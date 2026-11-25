@@ -51,8 +51,8 @@
   - 面板右上角支持一键 **`中 / EN`** 实时切换界面语言。
 - **Agent MCP 自助切号、低额度实时 Hook 预警与可选自动续跑**：
   - 内置零依赖 stdio MCP 服务（`mcp_config.json` -> `scripts/mcp-server.mjs`），提供 `get_switcher_status`、`list_accounts`、`get_quota` 与 `switch_account` 工具，并附带 `/switch-account` 技能（`skills/switch-account/SKILL.md`）。
-  - Sidecar 在后台低频检测当前账号 Gemini **周额度** 与 **5 小时额度**（每 `60 秒`）并落盘脱敏快照（`quota-alert.json`）；极轻 `PreInvocation` Hook（`hooks.json` -> `scripts/quota-hook.mjs`）仅毫秒级读取本地快照，正常时零注入、零常驻内存，任一额度跌破阈值（默认 `10%`）时按会话去重实时将预警送入正在执行的 Agent Loop。
-  - 在「高级工具 → **Agent 自动切号与低额度提醒**」中可调整阈值（`1%–50%`）、勾选监控周/5h 池，并按需开启「**允许 Agent 低额度自动切号**」（仅在无其他并发会话/任务时生效）与「**切号重启后自动唤醒当前会话续跑**」（新 `language_server` 就绪后通过 `agentapi send-message` 唤醒原会话）。
+  - Sidecar 在后台低频检测当前账号 Gemini **周额度** 与 **5 小时额度**（每 `60 秒`）并落盘脱敏快照（`quota-alert.json`）；极轻 `PreInvocation` Hook（`hooks.json` -> `scripts/quota-hook.mjs`，在 Windows 下若 `PATH` 缺少 `node` 会自动回退到 Antigravity 内置的 `%APPDATA%\Antigravity\bin\agy-node.cmd`）仅毫秒级读取本地快照，正常时零注入、零常驻内存，任一额度跌破阈值（默认 `10%`）时按会话去重实时将预警送入正在执行的 Agent Loop。
+  - 在「高级工具 → **Agent 自动切号与低额度提醒**」中可调整阈值（`1%–50%`）、勾选监控周/5h 池，并按需开启「**允许 Agent 低额度自动切号**」（仅在无其他并发会话/任务时生效）与「**切号重启后自动唤醒当前会话续跑**」；切号时会智能等待当前回合正常收尾后再停壳，重拉时同步 `app_storage.json` 跳过重复的 `One last thing` 弹窗，开启自动续跑时会在新 Hub 与 MCP 工具就绪后发送 `agentapi send-message` 唤醒原会话。
 
 ## 功能边界与已知限制
 

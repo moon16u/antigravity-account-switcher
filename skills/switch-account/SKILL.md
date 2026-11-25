@@ -27,4 +27,4 @@ Use the bundled MCP server tools (`antigravity-account-switcher_switcher`):
      - `conversationId` (always pass the current conversation ID when available so active-work detection excludes this conversation and optional auto-resume can wake it after restart)
      - `reason` (short summary)
    - **Active-work guardrail**: Never pass `force: true` on your own. If `switch_account` reports `ACTIVE_WORK_RUNNING` (other running chats, background tasks, or terminals), inform the user and wait for explicit confirmation before forcing.
-   - Because switching restarts Antigravity after a short delay (default 3 seconds), deliver a concise closing summary immediately after `switch_account` succeeds.
+   - Immediately after `switch_account` succeeds, output a brief closing summary and end the current turn right away (do not issue any further tool calls), allowing `switcher-worker` to detect that this turn finished cleanly and restart Antigravity immediately; once restarted, wait until MCP tools are ready before automatically waking a new turn.

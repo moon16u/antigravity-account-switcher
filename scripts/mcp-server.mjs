@@ -13,6 +13,7 @@ import {
 } from '../sidecars/switcher/quota-guard.mjs';
 import {
   appendSwitchLog,
+  CONVERSATION_ID_RE,
   listPublicAccounts,
   maskEmail,
   normalizeEmail,
@@ -398,10 +399,11 @@ export function createMcpHandlers(options = {}) {
       };
 
       const delayMs = settings.switchDelaySec * 1000;
+      const validCid = CONVERSATION_ID_RE.test(cid) ? cid : '';
       const resume =
-        settings.autoResumeEnabled && cid
+        settings.autoResumeEnabled && validCid
           ? {
-              conversationId: cid,
+              conversationId: validCid,
               message:
                 typeof args.resumeMessage === 'string' && args.resumeMessage.trim()
                   ? args.resumeMessage.trim()
@@ -409,6 +411,14 @@ export function createMcpHandlers(options = {}) {
               agentApiExe: String(ctx.lsEnv.ANTIGRAVITY_AGENTAPI_EXE || '').trim(),
             }
           : null;
+      const waitConversationIdle = validCid
+        ? {
+            conversationId: validCid,
+            minDelayMs: Math.min(1500, delayMs),
+            maxWaitMs: Math.max(10_000, delayMs),
+            fallbackDelayMs: delayMs,
+          }
+        : null;
 
       const job = prepareSwitchJob(paths, {
         mode: 'switch',
@@ -418,6 +428,7 @@ export function createMcpHandlers(options = {}) {
         context: jobContext,
         delayMs,
         resume,
+        waitConversationIdle,
       });
 
       await spawnWorker(job.jobPath, paths.dataDir, ctx.lsEnv);
@@ -429,7 +440,9 @@ export function createMcpHandlers(options = {}) {
         targetMaskedEmail: job.targetMaskedEmail || maskEmail(ctx.accounts.find((a) => a.id === targetAccountId)?.maskedEmail || ''),
         delaySec: settings.switchDelaySec,
         autoResumeScheduled: Boolean(resume),
-        message: `已调度切换到 ${job.targetMaskedEmail}，将在 ${settings.switchDelaySec} 秒后关闭并重启 Antigravity。`,
+        message: waitConversationIdle
+          ? `已调度切换到 ${job.targetMaskedEmail}，将在本轮回复完成后（最多 ${Math.round(waitConversationIdle.maxWaitMs / 1000)} 秒）自动关闭并重启 Antigravity。`
+          : `已调度切换到 ${job.targetMaskedEmail}，将在 ${settings.switchDelaySec} 秒后关闭并重启 Antigravity。`,
       });
     }
 
