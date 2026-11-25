@@ -3,13 +3,22 @@ import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { callLsRpc, detectActiveWork } from './active-work.mjs';
-import { createCloudCodeService } from './cloudcode.mjs';
+import { createCloudCodeService, normalizeQuotaSummary } from './cloudcode.mjs';
 import { createOAuthManager } from './oauth.mjs';
 import { resolveWindowsDirs, spawnDetachedWorker } from './platform.mjs';
+import {
+  evaluateQuotaAlert,
+  loadGuardSettings,
+  pickBestBackupAccount,
+  readQuotaAlertSnapshot,
+  saveGuardSettings,
+  writeQuotaAlertSnapshot,
+} from './quota-guard.mjs';
 import {
   appendSwitchLog,
   captureCurrentAccount,
   listPublicAccounts,
+  maskEmail,
   normalizeEmail,
   prepareSwitchJob,
   readActiveToken,
@@ -157,6 +166,7 @@ export async function createApp(options = {}) {
   });
   const getUserStatus = options.getUserStatus || (() => fetchLsUserStatus(env));
   const checkActiveWork = options.detectActiveWork || (() => detectActiveWork(env));
+  const callLsRpcFn = options.callLsRpc || callLsRpc;
   const spawnWorker =
     options.spawnWorker ||
     ((jobPath, dataDir = paths.dataDir) =>
@@ -165,7 +175,11 @@ export async function createApp(options = {}) {
   const writeLimit = createRateLimiter(options.writeLimit ?? 10, 60_000);
   const remoteLimit = createRateLimiter(options.remoteLimit ?? 30, 60_000);
   const switchLockMs = options.switchLockMs ?? 15_000;
+  const quotaPollIntervalMs = options.quotaPollIntervalMs ?? 60_000;
   let switchInProgress = false;
+  let quotaPollRunning = false;
+  let initialQuotaTimer = null;
+  let quotaPollTimer = null;
 
   function jsonResponse(payload, status = 200) {
     return new Response(JSON.stringify(payload), {
@@ -220,8 +234,113 @@ export async function createApp(options = {}) {
       active: sanitizeActiveState(active, lsUser, { revealEmail: revealEmails }),
       accounts: listPublicAccounts(paths, effectiveActiveEmail, { revealEmails, activeTierName }),
       logs: readRecentLogs(paths, 30),
+      settings: loadGuardSettings(paths),
+      quotaAlert: readQuotaAlertSnapshot(paths),
       switching: switchInProgress,
     };
+  }
+
+  async function refreshQuotaAlertSnapshot({ forceRefresh = false } = {}) {
+    if (quotaPollRunning) return readQuotaAlertSnapshot(paths);
+    quotaPollRunning = true;
+    try {
+      const settings = loadGuardSettings(paths);
+      const active = readActiveToken(paths, env);
+      const lsUser = await getUserStatus().catch(() => ({ lsConnected: false, email: '', tierName: '' }));
+      const effectiveActiveEmail = normalizeEmail((lsUser.lsConnected ? lsUser.email : '') || active.email);
+      const activeTierName = (lsUser.lsConnected ? lsUser.tierName : '') || '';
+      const accounts = listPublicAccounts(paths, effectiveActiveEmail, {
+        revealEmails: false,
+        activeTierName,
+      });
+      const activeAccount = accounts.find((a) => a.isActive) || null;
+
+      let summary = null;
+      if (activeAccount) {
+        try {
+          const res = await cloudCode.fetchAccountUsage({
+            id: activeAccount.id,
+            activeEmail: effectiveActiveEmail,
+            lsConnected: Boolean(lsUser.lsConnected),
+            forceRefresh,
+          });
+          summary = res?.usage || null;
+        } catch {
+          summary = null;
+        }
+      } else if (lsUser.lsConnected) {
+        try {
+          const lsRaw = await callLsRpcFn(env, 'RetrieveUserQuotaSummary', {
+            timeoutMs: 2500,
+            body: forceRefresh ? { forceRefresh: true } : {},
+          });
+          const parsed = normalizeQuotaSummary(lsRaw);
+          if (parsed && parsed.groups.length > 0) {
+            summary = parsed;
+          }
+        } catch {
+          summary = null;
+        }
+      }
+
+      if (!summary) {
+        return readQuotaAlertSnapshot(paths);
+      }
+
+      const evalResult = evaluateQuotaAlert(summary, settings);
+      let bestCandidate = null;
+      if (evalResult.triggered) {
+        const usageById = new Map();
+        const others = accounts.filter((a) => !a.isActive);
+        await Promise.allSettled(
+          others.map(async (acc) => {
+            const res = await cloudCode.fetchAccountUsage({
+              id: acc.id,
+              activeEmail: effectiveActiveEmail,
+              lsConnected: Boolean(lsUser.lsConnected),
+              forceRefresh: false,
+            });
+            if (res?.usage) {
+              usageById.set(acc.id, res.usage);
+            }
+          })
+        );
+        bestCandidate = pickBestBackupAccount(accounts, usageById, {
+          activeAccountId: activeAccount?.id || '',
+          activeEmail: effectiveActiveEmail,
+          thresholdPercent: settings.thresholdPercent,
+        });
+      }
+
+      return writeQuotaAlertSnapshot(paths, {
+        activeAccountId: activeAccount?.id || '',
+        activeMaskedEmail: maskEmail(effectiveActiveEmail),
+        activeTierName: activeTierName || activeAccount?.tierName || '',
+        triggered: evalResult.triggered,
+        triggeredBuckets: evalResult.triggeredBuckets,
+        weeklyPercent: evalResult.weeklyPercent,
+        fiveHourPercent: evalResult.fiveHourPercent,
+        thresholdPercent: evalResult.thresholdPercent,
+        settings,
+        bestCandidate,
+      });
+    } catch (err) {
+      console.error(`[switcher] quota alert refresh error=${err?.message || 'unknown'}`);
+      return null;
+    } finally {
+      quotaPollRunning = false;
+    }
+  }
+
+  if (Number.isFinite(quotaPollIntervalMs) && quotaPollIntervalMs > 0) {
+    initialQuotaTimer = setTimeout(() => {
+      void refreshQuotaAlertSnapshot();
+    }, 3000);
+    initialQuotaTimer.unref?.();
+    quotaPollTimer = setInterval(() => {
+      void refreshQuotaAlertSnapshot();
+    }, quotaPollIntervalMs);
+    quotaPollTimer.unref?.();
   }
 
   app.page('/', () => assetResponse('index.html', 'text/html; charset=utf-8'));
@@ -477,11 +596,42 @@ export async function createApp(options = {}) {
     'POST'
   );
 
+  app.api(
+    '/api/settings/update',
+    async (data) => {
+      const blocked = requireSecurityGate(writeLimit);
+      if (blocked) return blocked;
+      try {
+        const nextSettings = saveGuardSettings(paths, data && typeof data === 'object' ? data : {});
+        await refreshQuotaAlertSnapshot({ forceRefresh: false });
+        const state = await buildStatePayload({ revealEmails: Boolean(data?.revealEmails) });
+        return jsonResponse({
+          ...state,
+          settings: nextSettings,
+          message: '已更新 Agent 守护与切号设置',
+        });
+      } catch (err) {
+        const mapped = mapError(err);
+        return jsonResponse({ error: mapped.error }, mapped.status);
+      }
+    },
+    'POST'
+  );
+
   return {
     app,
     paths,
+    refreshQuotaAlert: refreshQuotaAlertSnapshot,
     start: () => app.run(),
     close: async () => {
+      if (initialQuotaTimer) {
+        clearTimeout(initialQuotaTimer);
+        initialQuotaTimer = null;
+      }
+      if (quotaPollTimer) {
+        clearInterval(quotaPollTimer);
+        quotaPollTimer = null;
+      }
       oauthManager.dispose();
       await app.close();
     },

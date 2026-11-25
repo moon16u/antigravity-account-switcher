@@ -49,6 +49,10 @@
 - **切号前活跃任务护栏与内置双语界面（`中 / EN`）**：
   - 切号前探测 `language_server` RPC（`GetAllCascadeTrajectories`、`ListBackgroundTasks`、`ListTerminals`）并扫描用户子进程（自动排除 Sidecar 与常驻 MCP 服务等基础设施进程）；若检测到活跃任务，默认返回 `HTTP 409` 并提供「重新检查并切换」「取消」及记入审计日志（`FORCE_SWITCH_REQUESTED`）的「仍要强制切换」。
   - 面板右上角支持一键 **`中 / EN`** 实时切换界面语言。
+- **Agent MCP 自助切号、低额度实时 Hook 预警与可选自动续跑**：
+  - 内置零依赖 stdio MCP 服务（`mcp_config.json` -> `scripts/mcp-server.mjs`），提供 `get_switcher_status`、`list_accounts`、`get_quota` 与 `switch_account` 工具，并附带 `/switch-account` 技能（`skills/switch-account/SKILL.md`）。
+  - Sidecar 在后台低频检测当前账号 Gemini **周额度** 与 **5 小时额度**（每 `60 秒`）并落盘脱敏快照（`quota-alert.json`）；极轻 `PreInvocation` Hook（`hooks.json` -> `scripts/quota-hook.mjs`）仅毫秒级读取本地快照，正常时零注入、零常驻内存，任一额度跌破阈值（默认 `10%`）时按会话去重实时将预警送入正在执行的 Agent Loop。
+  - 在「高级工具 → **Agent 自动切号与低额度提醒**」中可调整阈值（`1%–50%`）、勾选监控周/5h 池，并按需开启「**允许 Agent 低额度自动切号**」（仅在无其他并发会话/任务时生效）与「**切号重启后自动唤醒当前会话续跑**」（新 `language_server` 就绪后通过 `agentapi send-message` 唤醒原会话）。
 
 ## 功能边界与已知限制
 
@@ -143,6 +147,9 @@
 - `last-token.enc.json` — 切号前自动备份的活跃凭证密文（Unix 下 `0600`）
 - `jobs/job-<uuid>.enc.json` — 单次加密切号任务（由 `switcher-worker.mjs` 读取后立即删除）
 - `switch.log` — 脱敏的切号、OAuth 错误码与强制切换审计日志（不含任何明文邮箱或令牌）
+- `settings.json` — 低额度守护阈值、自动切号与自动唤醒续跑配置（Unix 下 `0600`）
+- `quota-alert.json` — 脱敏的当前账号低额度状态快照与推荐满血备用号
+- `hook-alert-state.json` — `PreInvocation` Hook 按会话去重状态记录
 
 ## 安全架构
 
@@ -155,9 +162,15 @@
 ## 仓库结构
 
 - `plugin.json` — 插件清单（`antigravity-account-switcher`，显示名 `Account Switcher`）
+- `mcp_config.json` — 内置 stdio MCP 服务配置（`switcher`）
+- `hooks.json` — 内置 `PreInvocation` 低额度预警 Hook 配置（`quota-guard`）
+- `scripts/mcp-server.mjs` — 零依赖 MCP 服务，暴露脱敏状态、配额查询与安全切号工具
+- `scripts/quota-hook.mjs` — 极轻短命 `PreInvocation` Hook，读取本地快照注入去重低额度提醒
+- `skills/switch-account/SKILL.md` — 面向 Agent 的 `/switch-account` 技能指南
 - `assets/logo.svg` — 插件图标
 - `sidecars/switcher/sidecar.json` — Sidecar 入口定义（`command: "node"`、`args: ["main.mjs"]`、`SIDECAR_UI_ENTRYPOINT_AUX_PANE`）
-- `sidecars/switcher/main.mjs` — Sidecar HTTP 服务、API 路由、安全门禁与限流
+- `sidecars/switcher/main.mjs` — Sidecar HTTP 服务、API 路由、后台配额轮询、安全门禁与限流
+- `sidecars/switcher/quota-guard.mjs` — 配额阈值评估、最优备用号挑选、守护配置与活跃 Hub 自动发现
 - `sidecars/switcher/platform.mjs` — 跨平台运行时检测、路径转换、二进制发现、浏览器唤起与桌面端重启
 - `sidecars/switcher/binary-oauth.mjs` — ELF64 / PE64 / Mach-O 64-bit（含 Universal Fat）OAuth 客户端提取器
 - `sidecars/switcher/oauth.mjs` — PKCE S256 回环 OAuth 管理器与双模式代理 HTTPS 客户端
@@ -167,26 +180,26 @@
 - `sidecars/switcher/active-work.mjs` — 切号前 RPC 与用户子进程活跃探测器
 - `sidecars/switcher/switcher-worker.mjs` — 脱离进程树的独立切号与重启执行器
 - `sidecars/switcher/public/` — 侧栏 Web UI（`index.html`、`app.js`、`styles.css`）
-- `sidecars/switcher/test/switcher.test.mjs` — 全隔离单元测试与集成测试套件
+- `sidecars/switcher/test/` — 全隔离单元测试与集成测试套件（`switcher.test.mjs`、`mcp-and-hook.test.mjs`）
 
 ## 验证与测试
 
 在 Node.js >= 18 下运行测试套件：
 
 ```bash
-node --test sidecars/switcher/test/switcher.test.mjs
+node --test sidecars/switcher/test/switcher.test.mjs sidecars/switcher/test/mcp-and-hook.test.mjs
 ```
 
 在 Node.js >= 24.5 下同时验证 `--use-env-proxy` 原生代理模式：
 
 ```bash
-node --use-env-proxy --test sidecars/switcher/test/switcher.test.mjs
+node --use-env-proxy --test sidecars/switcher/test/switcher.test.mjs sidecars/switcher/test/mcp-and-hook.test.mjs
 ```
 
 对所有 `.mjs` 模块与前端脚本执行语法检查：
 
 ```bash
-for f in sidecars/switcher/*.mjs sidecars/switcher/test/*.mjs sidecars/switcher/public/app.js; do node --check "$f"; done
+for f in scripts/*.mjs sidecars/switcher/*.mjs sidecars/switcher/test/*.mjs sidecars/switcher/public/app.js; do node --check "$f"; done
 ```
 
 ## 开源许可

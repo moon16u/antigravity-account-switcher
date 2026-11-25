@@ -1,15 +1,28 @@
 import { execFileSync, spawn } from 'node:child_process';
-import { existsSync, readdirSync, readFileSync, readlinkSync, realpathSync, statSync, unlinkSync } from 'node:fs';
+import {
+  existsSync,
+  lstatSync,
+  readdirSync,
+  readFileSync,
+  readlinkSync,
+  realpathSync,
+  statSync,
+  unlinkSync,
+} from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
+  buildRelaunchEnv,
   detectRuntime,
   readRunInBackgroundSetting,
   relaunchAntigravity,
+  resolveLanguageServerCandidates,
   resolveWindowsDirs,
+  syncOnboardingLastLoginUsername,
 } from './platform.mjs';
+import { discoverLiveHub, snapshotDaemonHubPids } from './quota-guard.mjs';
 import { removeActiveTokenRaw, writeActiveTokenRaw } from './token-store.mjs';
 import {
   appendSwitchLog,
@@ -501,6 +514,128 @@ async function stopAntigravityAndWait(paths, env = process.env, runtime = detect
   return stopWindowsOrWslAntigravity(paths, env, runtime);
 }
 
+const CONVERSATION_ID_RE = /^[A-Za-z0-9_-]{8,128}$/;
+
+function isRegularNonSymlinkFile(filePath) {
+  if (!filePath || typeof filePath !== 'string') return false;
+  try {
+    const st = lstatSync(filePath);
+    return !st.isSymbolicLink() && st.isFile();
+  } catch {
+    return false;
+  }
+}
+
+export function resolveAgentApiCommand(
+  resume = {},
+  env = process.env,
+  runtime = detectRuntime(env),
+  { appDataDir = '', isRegularFn = isRegularNonSymlinkFile, lsCandidates = null } = {}
+) {
+  const candidates = [];
+  const pushUnique = (p) => {
+    const val = typeof p === 'string' ? p.trim() : '';
+    if (val && !candidates.includes(val)) {
+      candidates.push(val);
+    }
+  };
+
+  pushUnique(resume?.agentApiExe);
+  pushUnique(env?.ANTIGRAVITY_AGENTAPI_EXE);
+  if (appDataDir) {
+    pushUnique(join(appDataDir, 'bin', runtime === 'win32' ? 'agentapi.exe' : 'agentapi'));
+  }
+  const lsList = Array.isArray(lsCandidates) ? lsCandidates : resolveLanguageServerCandidates(env, runtime);
+  for (const cand of lsList) {
+    pushUnique(cand);
+  }
+
+  for (const bin of candidates) {
+    if (!isRegularFn(bin)) continue;
+    const base = basename(bin).toLowerCase();
+    if (base.startsWith('agentapi')) {
+      return { bin, prefixArgs: [] };
+    }
+    return { bin, prefixArgs: ['agentapi'] };
+  }
+  return null;
+}
+
+export async function resumeConversationAfterRelaunch(
+  paths,
+  resume,
+  env = process.env,
+  {
+    previousHubPids = new Set(),
+    runtime = detectRuntime(env),
+    timeoutMs = 45_000,
+    pollIntervalMs = 1000,
+    discoverFn = discoverLiveHub,
+    execFn = execFileSync,
+    delayFn = delay,
+    cmdInfo = null,
+  } = {}
+) {
+  const cid = typeof resume?.conversationId === 'string' ? resume.conversationId.trim() : '';
+  if (!CONVERSATION_ID_RE.test(cid)) {
+    return { ok: false, reason: 'INVALID_CONVERSATION_ID' };
+  }
+
+  const resolvedCmd =
+    cmdInfo || resolveAgentApiCommand(resume, env, runtime, { appDataDir: paths?.appDataDir || '' });
+  if (!resolvedCmd) {
+    appendSwitchLog(paths, `AUTO_RESUME_FAILED cid=${cid} reason=MISSING_AGENTAPI_BIN`);
+    return { ok: false, reason: 'MISSING_AGENTAPI_BIN' };
+  }
+
+  const deadline = Date.now() + Math.max(100, timeoutMs);
+  let liveHub = null;
+  while (Date.now() < deadline) {
+    const probeEnv = { ...buildRelaunchEnv(env) };
+    liveHub = await discoverFn(probeEnv, {
+      appDataDir: paths?.appDataDir || '',
+      excludePids: previousHubPids,
+      timeoutMs: 1500,
+    }).catch(() => null);
+    if (liveHub && liveHub.lsAddress && liveHub.csrfToken) {
+      break;
+    }
+    await delayFn(pollIntervalMs);
+  }
+
+  if (!liveHub || !liveHub.lsAddress || !liveHub.csrfToken) {
+    appendSwitchLog(paths, `AUTO_RESUME_FAILED cid=${cid} reason=HUB_DISCOVERY_TIMEOUT`);
+    return { ok: false, reason: 'HUB_DISCOVERY_TIMEOUT' };
+  }
+
+  const sendEnv = {
+    ...buildRelaunchEnv(env),
+    ANTIGRAVITY_LS_ADDRESS: liveHub.lsAddress,
+    ANTIGRAVITY_CSRF_TOKEN: liveHub.csrfToken,
+  };
+  const msg =
+    typeof resume?.message === 'string' && resume.message.trim()
+      ? resume.message.trim().slice(0, 500)
+      : '账号已切换完成，请继续刚才未完成的任务。';
+
+  try {
+    execFn(resolvedCmd.bin, [...resolvedCmd.prefixArgs, 'send-message', cid, msg], {
+      env: sendEnv,
+      timeout: 15_000,
+      windowsHide: true,
+      stdio: 'pipe',
+    });
+    appendSwitchLog(paths, `AUTO_RESUME_SENT cid=${cid} pid=${liveHub.pid || 0}`);
+    return { ok: true, pid: liveHub.pid || 0 };
+  } catch (err) {
+    const reason = String(err?.code || err?.message || 'EXEC_FAILED')
+      .replace(/[\r\n]+/g, ' ')
+      .slice(0, 80);
+    appendSwitchLog(paths, `AUTO_RESUME_FAILED cid=${cid} reason=${reason}`);
+    return { ok: false, reason: 'EXEC_FAILED' };
+  }
+}
+
 export async function runWorker(jobArg, env = process.env, dataDirArg = '') {
   if (typeof jobArg !== 'string' || !jobArg) {
     throw new Error('MISSING_JOB_PATH');
@@ -574,9 +709,22 @@ export async function runWorker(jobArg, env = process.env, dataDirArg = '') {
   const targetMasked = maskEmail(job.targetEmail || '') || '-';
   const dryRun = effectiveEnv.SWITCHER_DRY_RUN === '1';
   const runtime = detectRuntime(effectiveEnv);
+  const delayMs =
+    typeof job.delayMs === 'number' && Number.isSafeInteger(job.delayMs) && job.delayMs > 0
+      ? Math.min(15_000, job.delayMs)
+      : 0;
   appendSwitchLog(paths, `START mode=${job.mode} target=${targetMasked} runtime=${runtime}${dryRun ? ' DRY_RUN' : ''}`);
 
   try {
+    let previousHubPids = new Set();
+    if (!dryRun && job.resume?.conversationId) {
+      previousHubPids = snapshotDaemonHubPids(effectiveEnv, { appDataDir: paths.appDataDir });
+    }
+    if (!dryRun && delayMs > 0) {
+      appendSwitchLog(paths, `DELAY_BEFORE_STOP ms=${delayMs}`);
+      await delay(delayMs);
+    }
+
     let stopInfo = {};
     if (!dryRun) {
       stopInfo = (await stopAntigravityAndWait(paths, effectiveEnv, runtime)) || {};
@@ -588,6 +736,13 @@ export async function runWorker(jobArg, env = process.env, dataDirArg = '') {
         paths,
         `TOKEN_WRITTEN target=${targetMasked} store=${written.target} keyringCleared=${written.keyringCleared ? 1 : 0}${dryRun ? ' DRY_RUN' : ''}`
       );
+      if (!dryRun) {
+        const onboardingSync = syncOnboardingLastLoginUsername(job.targetEmail, effectiveEnv, runtime);
+        appendSwitchLog(
+          paths,
+          `ONBOARDING_SYNC updated=${onboardingSync.updated ? 1 : 0} reason=${onboardingSync.reason}`
+        );
+      }
     } else {
       const removed = removeActiveTokenRaw(paths, effectiveEnv);
       appendSwitchLog(
@@ -596,9 +751,16 @@ export async function runWorker(jobArg, env = process.env, dataDirArg = '') {
       );
     }
 
+    let relaunchCode = '';
     if (!dryRun) {
-      const relaunchCode = relaunchAntigravity(effectiveEnv, runtime, stopInfo);
+      relaunchCode = relaunchAntigravity(effectiveEnv, runtime, stopInfo);
       appendSwitchLog(paths, relaunchCode);
+      if (job.resume?.conversationId && !String(relaunchCode).startsWith('RELAUNCH_SKIPPED')) {
+        await resumeConversationAfterRelaunch(paths, job.resume, effectiveEnv, {
+          previousHubPids,
+          runtime,
+        });
+      }
     }
     appendSwitchLog(paths, `DONE mode=${job.mode}${dryRun ? ' DRY_RUN' : ''}`);
   } catch (err) {

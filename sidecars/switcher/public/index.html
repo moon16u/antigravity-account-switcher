@@ -86,6 +86,47 @@
     </section>
 
     <section class="card tools-card" aria-label="高级工具">
+      <details id="agent-guard-details" class="tool-item">
+        <summary id="guard-summary" class="tool-summary">Agent 自动切号与低额度提醒</summary>
+        <div class="tool-body">
+          <form id="guard-settings-form" class="guard-form" autocomplete="off">
+            <label class="guard-check">
+              <input id="guard-alert-enabled" type="checkbox">
+              <span id="guard-alert-label">启用低额度实时提醒</span>
+            </label>
+            <label class="guard-check">
+              <input id="guard-watch-weekly" type="checkbox">
+              <span id="guard-watch-weekly-label">监控 Gemini 周额度</span>
+            </label>
+            <label class="guard-check">
+              <input id="guard-watch-5h" type="checkbox">
+              <span id="guard-watch-5h-label">监控 Gemini 5 小时额度</span>
+            </label>
+            <label class="guard-threshold-row">
+              <span id="guard-threshold-label">触发阈值（剩余百分比 ≤）</span>
+              <select id="guard-threshold" class="guard-select" aria-label="触发阈值">
+                <option value="10">10%</option>
+                <option value="20">20%</option>
+                <option value="30">30%</option>
+                <option value="40">40%</option>
+                <option value="50">50%</option>
+              </select>
+            </label>
+            <label class="guard-check">
+              <input id="guard-auto-switch" type="checkbox">
+              <span id="guard-auto-switch-label">允许 Agent 低额度自动切号（仅在无其他并发会话/任务时）</span>
+            </label>
+            <label class="guard-check">
+              <input id="guard-auto-resume" type="checkbox">
+              <span id="guard-auto-resume-label">切号重启后自动唤醒当前会话续跑</span>
+            </label>
+            <div class="tool-actions">
+              <button id="guard-save-btn" type="submit" class="btn btn-primary btn-sm">保存设置</button>
+            </div>
+          </form>
+        </div>
+      </details>
+
       <details id="fallback-login-details" class="tool-item">
         <summary id="fallback-summary" class="tool-summary">原生登录（备用）</summary>
         <div class="tool-body">

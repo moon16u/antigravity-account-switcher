@@ -1,0 +1,12 @@
+{
+  "quota-guard": {
+    "enabled": true,
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "node ./scripts/quota-hook.mjs",
+        "timeout": 5
+      }
+    ]
+  }
+}

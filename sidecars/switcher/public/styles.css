@@ -71,7 +71,7 @@ html, body {
   text-rendering: optimizeLegibility;
 }
 
-button, input {
+button, input, select {
   font: inherit;
   color: inherit;
 }
@@ -288,6 +288,7 @@ input[type="text"]:hover {
 }
 
 input:focus-visible,
+select:focus-visible,
 button:focus-visible,
 a.btn:focus-visible,
 summary:focus-visible {
@@ -902,6 +903,58 @@ summary:focus-visible {
   display: flex;
   justify-content: flex-start;
   gap: 6px;
+}
+
+.guard-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.guard-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  font-size: 12px;
+  color: var(--sw-fg);
+  line-height: 1.4;
+  cursor: pointer;
+}
+
+.guard-check input[type="checkbox"] {
+  margin-top: 2px;
+  accent-color: var(--sw-primary);
+  flex: none;
+}
+
+.guard-threshold-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--sw-fg-2);
+}
+
+.guard-select {
+  min-width: 76px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--sw-border);
+  background: var(--sw-field);
+  color: var(--sw-fg);
+  font-size: 12px;
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.guard-select:hover {
+  border-color: color-mix(in srgb, var(--sw-fg) 20%, transparent);
+}
+
+.guard-select option {
+  background: var(--sw-card);
+  color: var(--sw-fg);
 }
 
 .logs-view {

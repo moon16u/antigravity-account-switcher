@@ -55,8 +55,8 @@ jobs:
           EOF
 
       - name: Run test suite
-        run: node --test sidecars/switcher/test/switcher.test.mjs
+        run: node --test sidecars/switcher/test/switcher.test.mjs sidecars/switcher/test/mcp-and-hook.test.mjs
 
       - name: Run test suite with --use-env-proxy (Node 24)
         if: matrix.node-version == '24'
-        run: node --use-env-proxy --test sidecars/switcher/test/switcher.test.mjs
+        run: node --use-env-proxy --test sidecars/switcher/test/switcher.test.mjs sidecars/switcher/test/mcp-and-hook.test.mjs

@@ -49,6 +49,10 @@ A cross-platform auxiliary-pane sidecar plugin (`SIDECAR_UI_ENTRYPOINT_AUX_PANE`
 - **Pre-Switch Active-Work Guard & Bilingual UI (`中 / EN`)**:
   - Checks `GetAllCascadeTrajectories`, `ListBackgroundTasks`, and `ListTerminals` via `language_server` RPC plus active user child processes before switching; pauses with **Recheck & Switch**, **Cancel**, or audited **Force Switch** (`FORCE_SWITCH_REQUESTED` in `switch.log`) when work is running.
   - Built-in instant **`中 / EN`** toggle switches all in-panel UI copy immediately.
+- **Agent MCP Tools, Low-Quota Hook Alert & Optional Auto-Resume**:
+  - Bundles a zero-dependency stdio MCP server (`mcp_config.json` -> `scripts/mcp-server.mjs`) exposing `get_switcher_status`, `list_accounts`, `get_quota`, and `switch_account` (with a matching `/switch-account` skill in `skills/switch-account/SKILL.md`).
+  - Sidecar polls the active account's Gemini **Weekly** and **5-Hour** quota in the background (every `60s`) and writes a sanitized snapshot (`quota-alert.json`). A lightweight `PreInvocation` hook (`hooks.json` -> `scripts/quota-hook.mjs`) reads the local snapshot in milliseconds with zero resident RAM and injects a deduplicated `systemMessage` into the running agent loop when either bucket drops to the configured threshold (default `10%`).
+  - In Tools → **Agent Auto-Switch & Quota Alert**, you can configure the threshold (`1%–50%`), toggle Weekly / 5h monitoring, opt in to **Allow Agent auto-switch on low quota** (safely blocked if any other conversation/task/terminal is active), and opt in to **Auto-resume current conversation after restart** (`agentapi send-message` once the new `language_server` hub comes up).
 
 ## Scope, Boundaries & Known Limitations
 
@@ -143,6 +147,9 @@ Runtime data is completely separated from plugin source files. Under Antigravity
 - `last-token.enc.json` — AES-256-GCM encrypted backup of the active token captured before switching (`0600` on Unix)
 - `jobs/job-<uuid>.enc.json` — Single-use encrypted switch job deleted immediately upon worker pickup
 - `switch.log` — Sanitized audit and diagnostic log (masked emails and error codes only; never logs tokens or secrets)
+- `settings.json` — Quota guard and Agent auto-switch / auto-resume preferences (`0600` on Unix)
+- `quota-alert.json` — Sanitized active-account quota alert snapshot and best healthy backup candidate
+- `hook-alert-state.json` — Per-conversation `PreInvocation` hook deduplication state
 
 ## Security Architecture
 
@@ -155,9 +162,15 @@ Runtime data is completely separated from plugin source files. Under Antigravity
 ## Repository Structure
 
 - `plugin.json` — Plugin manifest (`antigravity-account-switcher`, display name `Account Switcher`)
+- `mcp_config.json` — Bundled stdio MCP server declaration (`switcher`)
+- `hooks.json` — Bundled `PreInvocation` low-quota hook declaration (`quota-guard`)
+- `scripts/mcp-server.mjs` — Zero-dependency MCP server exposing account status, quota, and safe switch tools
+- `scripts/quota-hook.mjs` — Lightweight short-lived `PreInvocation` hook reading local quota snapshots
+- `skills/switch-account/SKILL.md` — `/switch-account` skill workflow for Antigravity Agents
 - `assets/logo.svg` — Plugin icon
 - `sidecars/switcher/sidecar.json` — Sidecar entrypoint (`command: "node"`, `args: ["main.mjs"]`, `SIDECAR_UI_ENTRYPOINT_AUX_PANE`)
-- `sidecars/switcher/main.mjs` — Sidecar HTTP server, API routes, security gates, and rate limiting
+- `sidecars/switcher/main.mjs` — Sidecar HTTP server, API routes, background quota polling, security gates, and rate limiting
+- `sidecars/switcher/quota-guard.mjs` — Quota threshold evaluation, best-backup selection, guard settings, and live hub discovery
 - `sidecars/switcher/platform.mjs` — Cross-platform runtime detection, path translation, binary discovery, browser launch, and Antigravity relaunch
 - `sidecars/switcher/binary-oauth.mjs` — ELF64, PE64, and Mach-O 64-bit / Universal Fat binary OAuth client extractor
 - `sidecars/switcher/oauth.mjs` — PKCE S256 loopback OAuth manager & dual-mode proxy HTTPS client
@@ -167,26 +180,26 @@ Runtime data is completely separated from plugin source files. Under Antigravity
 - `sidecars/switcher/active-work.mjs` — Pre-switch RPC and user child-process detector
 - `sidecars/switcher/switcher-worker.mjs` — Detached switch and desktop restart worker
 - `sidecars/switcher/public/` — Auxiliary-pane web UI (`index.html`, `app.js`, `styles.css`)
-- `sidecars/switcher/test/switcher.test.mjs` — Isolated unit and integration test suite
+- `sidecars/switcher/test/` — Isolated unit and integration test suites (`switcher.test.mjs`, `mcp-and-hook.test.mjs`)
 
 ## Running Tests
 
 Run the test suite on Node.js >= 18:
 
 ```bash
-node --test sidecars/switcher/test/switcher.test.mjs
+node --test sidecars/switcher/test/switcher.test.mjs sidecars/switcher/test/mcp-and-hook.test.mjs
 ```
 
 On Node.js >= 24.5, also verify native proxy mode with `--use-env-proxy`:
 
 ```bash
-node --use-env-proxy --test sidecars/switcher/test/switcher.test.mjs
+node --use-env-proxy --test sidecars/switcher/test/switcher.test.mjs sidecars/switcher/test/mcp-and-hook.test.mjs
 ```
 
 Run syntax checks across all `.mjs` modules and frontend script:
 
 ```bash
-for f in sidecars/switcher/*.mjs sidecars/switcher/test/*.mjs sidecars/switcher/public/app.js; do node --check "$f"; done
+for f in scripts/*.mjs sidecars/switcher/*.mjs sidecars/switcher/test/*.mjs sidecars/switcher/public/app.js; do node --check "$f"; done
 ```
 
 ## License

@@ -19,18 +19,39 @@ const MAX_LOG_BYTES = 256 * 1024;
 const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
 export function resolvePaths(env = process.env, overrides = {}) {
-  const geminiDir = resolve(overrides.geminiDir || env.ANTIGRAVITY_GEMINI_DIR || join(homedir(), '.gemini'));
+  const geminiDir = resolve(overrides.geminiDir || env?.ANTIGRAVITY_GEMINI_DIR || join(homedir(), '.gemini'));
   const tokenPath = resolve(overrides.tokenPath || join(geminiDir, 'jetski-standalone-oauth-token'));
-  const dataDir = resolve(
-    overrides.dataDir ||
-      env.ANTIGRAVITY_EXECUTABLE_DATA_DIR ||
-      join(geminiDir, 'antigravity', 'plugin_data', 'antigravity-account-switcher')
-  );
+  const appDataDir = resolve(env?.ANTIGRAVITY_APP_DATA_DIR || join(geminiDir, 'antigravity'));
+  const sidecarDataDir = join(appDataDir, 'sidecar_data', 'antigravity-account-switcher', 'switcher', 'data');
+
+  let resolvedDataDir = '';
+  if (overrides.dataDir) {
+    resolvedDataDir = resolve(overrides.dataDir);
+  } else if (env?.ANTIGRAVITY_EXECUTABLE_DATA_DIR) {
+    resolvedDataDir = resolve(env.ANTIGRAVITY_EXECUTABLE_DATA_DIR);
+  } else {
+    try {
+      const st = lstatSync(sidecarDataDir);
+      if (!st.isSymbolicLink() && st.isDirectory()) {
+        resolvedDataDir = resolve(sidecarDataDir);
+      }
+    } catch {
+      // Ignore missing sidecar_data directory and fall back
+    }
+    if (!resolvedDataDir) {
+      resolvedDataDir = resolve(env?.PLUGIN_DATA || join(appDataDir, 'plugin_data', 'antigravity-account-switcher'));
+    }
+  }
+
+  const dataDir = resolvedDataDir;
   const keyPath = assertInsideDir(dataDir, join(dataDir, 'vault.key'));
   const vaultPath = assertInsideDir(dataDir, join(dataDir, 'vault.enc.json'));
   const backupPath = assertInsideDir(dataDir, join(dataDir, 'last-token.enc.json'));
   const jobsDir = assertInsideDir(dataDir, join(dataDir, 'jobs'));
   const logPath = assertInsideDir(dataDir, join(dataDir, 'switch.log'));
+  const settingsPath = assertInsideDir(dataDir, join(dataDir, 'settings.json'));
+  const quotaAlertPath = assertInsideDir(dataDir, join(dataDir, 'quota-alert.json'));
+  const hookStatePath = assertInsideDir(dataDir, join(dataDir, 'hook-alert-state.json'));
   const useKeyring = !(
     Boolean(overrides.tokenPath) ||
     Boolean(overrides.geminiDir) ||
@@ -40,6 +61,7 @@ export function resolvePaths(env = process.env, overrides = {}) {
 
   return {
     geminiDir,
+    appDataDir,
     tokenPath,
     dataDir,
     keyPath,
@@ -47,6 +69,9 @@ export function resolvePaths(env = process.env, overrides = {}) {
     backupPath,
     jobsDir,
     logPath,
+    settingsPath,
+    quotaAlertPath,
+    hookStatePath,
     useKeyring,
   };
 }
@@ -624,9 +649,20 @@ function formatAutoBackupLabel(date) {
   return `自动备份 (${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())})`;
 }
 
+const CONVERSATION_ID_RE = /^[A-Za-z0-9_-]{8,128}$/;
+
 export function prepareSwitchJob(
   paths,
-  { mode, accountId = '', fallbackEmail = '', env = process.env, tokenStoreOpts = {}, context = null } = {}
+  {
+    mode,
+    accountId = '',
+    fallbackEmail = '',
+    env = process.env,
+    tokenStoreOpts = {},
+    context = null,
+    delayMs = 0,
+    resume = null,
+  } = {}
 ) {
   if (mode !== 'switch' && mode !== 'new-login') {
     throw new Error('INVALID_SWITCH_MODE');
@@ -701,6 +737,29 @@ export function prepareSwitchJob(
     }
   }
 
+  const cleanDelayMs =
+    typeof delayMs === 'number' && Number.isFinite(delayMs) && delayMs > 0
+      ? Math.min(15_000, Math.round(delayMs))
+      : 0;
+
+  let cleanResume = null;
+  if (resume && typeof resume === 'object' && !Array.isArray(resume)) {
+    const cid = typeof resume.conversationId === 'string' ? resume.conversationId.trim() : '';
+    if (CONVERSATION_ID_RE.test(cid)) {
+      const msg =
+        typeof resume.message === 'string'
+          ? resume.message.replace(/[\x00-\x1f\x7f]/g, ' ').trim().slice(0, 500)
+          : '';
+      const agentApiExe =
+        typeof resume.agentApiExe === 'string' ? resume.agentApiExe.trim().slice(0, 512) : '';
+      cleanResume = {
+        conversationId: cid,
+        message: msg || '账号已切换完成，请继续刚才未完成的任务。',
+        ...(agentApiExe ? { agentApiExe } : {}),
+      };
+    }
+  }
+
   const jobId = randomUUID();
   const jobPath = assertInsideDir(paths.jobsDir, join(paths.jobsDir, `job-${jobId}.enc.json`));
   const jobPayload = {
@@ -709,6 +768,8 @@ export function prepareSwitchJob(
     targetEmail,
     tokenRaw,
     createdAt: nowIso,
+    ...(cleanDelayMs > 0 ? { delayMs: cleanDelayMs } : {}),
+    ...(cleanResume ? { resume: cleanResume } : {}),
     ...(cleanContext ? { context: cleanContext } : {}),
   };
   const jobEnvelope = encryptPayload(jobPayload, key);

@@ -74,6 +74,14 @@
       kindProcess: '运行中子进程',
       kindDefault: '运行中任务',
       unnamedTask: '未命名任务',
+      guardSummary: 'Agent 自动切号与低额度提醒',
+      guardAlertLabel: '启用低额度实时提醒',
+      guardWatchWeeklyLabel: '监控 Gemini 周额度',
+      guardWatch5hLabel: '监控 Gemini 5 小时额度',
+      guardThresholdLabel: '触发阈值（剩余百分比 ≤）',
+      guardAutoSwitchLabel: '允许 Agent 低额度自动切号（仅在无其他并发会话/任务时）',
+      guardAutoResumeLabel: '切号重启后自动唤醒当前会话续跑',
+      guardSaveBtn: '保存设置',
       fallbackSummary: '原生登录（备用）',
       fallbackDesc:
         '浏览器授权受阻时可使用此方式：备份当前账号并退出桌面应用，以未登录状态重开窗口进行原生登录。',
@@ -96,6 +104,7 @@
       noticeOAuthCancelled: '已取消浏览器授权。',
       noticeRefreshed: '已刷新账号状态与用量',
       noticeRefreshedLocal: '已刷新本地账号状态',
+      noticeGuardSaved: '已更新 Agent 守护与切号设置',
     },
     en: {
       pageTitle: 'Account Switcher',
@@ -164,6 +173,14 @@
       kindProcess: 'Child Process',
       kindDefault: 'Active Task',
       unnamedTask: 'Unnamed Task',
+      guardSummary: 'Agent Auto-Switch & Quota Alert',
+      guardAlertLabel: 'Enable live low-quota alerts',
+      guardWatchWeeklyLabel: 'Watch Gemini Weekly quota',
+      guardWatch5hLabel: 'Watch Gemini 5-Hour quota',
+      guardThresholdLabel: 'Alert threshold (remaining ≤)',
+      guardAutoSwitchLabel: 'Allow Agent auto-switch on low quota (only when no other sessions/tasks are busy)',
+      guardAutoResumeLabel: 'Auto-resume current conversation after restart',
+      guardSaveBtn: 'Save Settings',
       fallbackSummary: 'Native Sign-in (Fallback)',
       fallbackDesc:
         'If browser authorization is blocked, use this option: back up the current account, quit the desktop app, and reopen signed out for native Google sign-in.',
@@ -186,6 +203,7 @@
       noticeOAuthCancelled: 'Browser authorization cancelled.',
       noticeRefreshed: 'Accounts & usage refreshed',
       noticeRefreshedLocal: 'Local account status refreshed',
+      noticeGuardSaved: 'Agent guard settings saved',
     },
   };
 
@@ -213,6 +231,7 @@
     usageById: {}, // { [id]: { status: 'idle' | 'loading' | 'loaded' | 'error', data: object | null, error: string } }
     usageLastFetchAt: {}, // { [id]: number }
     didInitialTierSync: false,
+    guardDirty: false,
     oauthPanelOpen: false,
     oauth: { status: 'idle', authUrl: '' },
     pollTimer: null,
@@ -645,6 +664,15 @@
     el('oauth-link').textContent = t('openAuthPage');
     el('oauth-copy-btn').textContent = t('copyAuthUrl');
     el('oauth-cancel-btn').textContent = t('cancelOAuth');
+
+    el('guard-summary').textContent = t('guardSummary');
+    el('guard-alert-label').textContent = t('guardAlertLabel');
+    el('guard-watch-weekly-label').textContent = t('guardWatchWeeklyLabel');
+    el('guard-watch-5h-label').textContent = t('guardWatch5hLabel');
+    el('guard-threshold-label').textContent = t('guardThresholdLabel');
+    el('guard-auto-switch-label').textContent = t('guardAutoSwitchLabel');
+    el('guard-auto-resume-label').textContent = t('guardAutoResumeLabel');
+    el('guard-save-btn').textContent = t('guardSaveBtn');
 
     el('fallback-summary').textContent = t('fallbackSummary');
     el('fallback-desc').textContent = t('fallbackDesc');
@@ -1202,6 +1230,23 @@
     listEl.replaceChildren(...nodes);
   }
 
+  function renderGuardSettings(data) {
+    const switching = Boolean(data?.switching || state.busy);
+    const settings = data?.settings;
+    el('guard-save-btn').disabled = switching;
+    if (!settings || state.guardDirty) return;
+    el('guard-alert-enabled').checked = Boolean(settings.alertEnabled);
+    el('guard-watch-weekly').checked = Boolean(settings.watchWeekly);
+    el('guard-watch-5h').checked = Boolean(settings.watch5h);
+    const normalizedThreshold = Math.min(
+      50,
+      Math.max(10, Math.round((Number(settings.thresholdPercent) || 10) / 10) * 10)
+    );
+    el('guard-threshold').value = String(normalizedThreshold);
+    el('guard-auto-switch').checked = Boolean(settings.autoSwitchEnabled);
+    el('guard-auto-resume').checked = Boolean(settings.autoResumeEnabled);
+  }
+
   function renderLogs(data) {
     const logs = Array.isArray(data?.logs) ? data.logs : [];
     el('logs-view').textContent = logs.length ? logs.join('\n') : t('noLogs');
@@ -1211,6 +1256,7 @@
     applyStaticI18n();
     renderHeaderAndUnsavedBanner(state.data);
     renderAccountsSection(state.data);
+    renderGuardSettings(state.data);
     renderLogs(state.data);
   }
 
@@ -1327,7 +1373,9 @@
     }
   }
 
-  async function executeAction(fn, keepConfirmOff = false) {
+  async function executeAction(fn, options = {}) {
+    const { keepConfirmOff = false, autoHideMs = 2500 } =
+      typeof options === 'boolean' ? { keepConfirmOff: options } : options || {};
     state.busy = true;
     if (keepConfirmOff) state.confirm = null;
     render();
@@ -1340,7 +1388,8 @@
           state.data = { ...(state.data || {}), switching: true };
         }
         if (res.message) {
-          showNotice(res.message, 'ok');
+          const hideMs = res.switching ? 0 : autoHideMs;
+          showNotice(res.message, 'ok', hideMs > 0 ? { autoHideMs: hideMs } : undefined);
         }
       }
       state.confirm = null;
@@ -1423,19 +1472,22 @@
     el('oauth-form').addEventListener('submit', (e) => {
       e.preventDefault();
       const label = el('oauth-label').value;
-      executeAction(async () => {
-        const res = await apiPost('/api/oauth/start', { label });
-        const oauth = res?.oauth || { status: 'idle' };
-        state.oauth = oauth;
-        state.oauthPanelOpen = true;
-        if (oauth.status === 'pending') {
-          startOAuthPolling();
-          return {
-            message: oauth.browserOpened ? t('noticeBrowserOpened') : t('noticeBrowserFallback'),
-          };
-        }
-        return {};
-      });
+      executeAction(
+        async () => {
+          const res = await apiPost('/api/oauth/start', { label });
+          const oauth = res?.oauth || { status: 'idle' };
+          state.oauth = oauth;
+          state.oauthPanelOpen = true;
+          if (oauth.status === 'pending') {
+            startOAuthPolling();
+            return {
+              message: oauth.browserOpened ? t('noticeBrowserOpened') : t('noticeBrowserFallback'),
+            };
+          }
+          return {};
+        },
+        { autoHideMs: 0 }
+      );
     });
 
     el('oauth-copy-btn').addEventListener('click', async () => {
@@ -1467,6 +1519,44 @@
       state.confirm = { type: 'new-login' };
       state.rename = null;
       render();
+    });
+
+    const guardForm = el('guard-settings-form');
+    for (const inputId of [
+      'guard-alert-enabled',
+      'guard-watch-weekly',
+      'guard-watch-5h',
+      'guard-threshold',
+      'guard-auto-switch',
+      'guard-auto-resume',
+    ]) {
+      el(inputId).addEventListener('input', () => {
+        state.guardDirty = true;
+      });
+      el(inputId).addEventListener('change', () => {
+        state.guardDirty = true;
+      });
+    }
+    guardForm.addEventListener('submit', (e) => {
+      e.preventDefault();
+      const rawThreshold = Number(el('guard-threshold').value);
+      const thresholdPercent = [10, 20, 30, 40, 50].includes(rawThreshold) ? rawThreshold : 10;
+      const payload = {
+        alertEnabled: el('guard-alert-enabled').checked,
+        watchWeekly: el('guard-watch-weekly').checked,
+        watch5h: el('guard-watch-5h').checked,
+        thresholdPercent,
+        autoSwitchEnabled: el('guard-auto-switch').checked,
+        autoResumeEnabled: el('guard-auto-resume').checked,
+      };
+      executeAction(
+        async () => {
+          const res = await apiPost('/api/settings/update', payload);
+          state.guardDirty = false;
+          return { ...res, message: t('noticeGuardSaved') };
+        },
+        { autoHideMs: 2500 }
+      );
     });
   }
 

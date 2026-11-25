@@ -31,6 +31,7 @@ export function isInfrastructureProcess(cmdline, { cwd = '' } = {}) {
     (procCwd && GEMINI_INFRA_PATH_RE.test(procCwd)) ||
     /[\\/]sidecar_sdk[\\/]register_loader\.js/i.test(cmd) ||
     /[\\/]sidecars[\\/][^\\/\s]+[\\/]main\.mjs(?:\s|$)/i.test(cmd) ||
+    /[\\/]scripts[\\/](?:mcp-server|quota-hook)\.mjs(?:\s|$)/i.test(cmd) ||
     /(?:^|\s|\/|\\)node(?:\.exe)?\s+(?:--[^\s]+\s+)*main\.mjs(?:\s|$)/i.test(cmd) ||
     /(?:^|\s)context-provider(?:\s|$)/i.test(cmd)
   ) {
@@ -260,16 +261,28 @@ export function scanDarwinPsForUserChildren(ownPid = process.pid) {
 /**
  * Extracts active cascades, background tasks, and terminals from LS RPC payloads.
  */
-export function extractActiveItemsFromLs({ trajectories, backgroundTasks, terminals } = {}) {
+export function extractActiveItemsFromLs({
+  trajectories,
+  backgroundTasks,
+  terminals,
+  excludeConversationIds = [],
+} = {}) {
   const items = [];
+  const excludeSet = new Set(
+    (Array.isArray(excludeConversationIds) ? excludeConversationIds : [])
+      .map((id) => String(id || '').trim())
+      .filter(Boolean)
+  );
 
   const summaries = trajectories?.trajectorySummaries;
   if (summaries && typeof summaries === 'object') {
-    for (const entry of Object.values(summaries)) {
+    for (const [cid, entry] of Object.entries(summaries)) {
       if (!entry || typeof entry !== 'object') continue;
+      if (excludeSet.has(cid)) continue;
       if (entry.status === 'CASCADE_RUN_STATUS_RUNNING' || entry.status === 'CASCADE_RUN_STATUS_BUSY') {
         items.push({
           kind: 'cascade',
+          conversationId: cid,
           label: truncateLabel(entry.summary || '进行中的对话', 80),
         });
       }
@@ -320,7 +333,7 @@ export function extractActiveItemsFromLs({ trajectories, backgroundTasks, termin
  */
 export async function detectActiveWork(
   env = process.env,
-  { ownPid = process.pid, rpcFn = callLsRpc, procScanFn } = {}
+  { ownPid = process.pid, rpcFn = callLsRpc, procScanFn, excludeConversationIds = [] } = {}
 ) {
   let scanner = procScanFn;
   if (!scanner) {
@@ -344,7 +357,10 @@ export async function detectActiveWork(
     procItems = [];
   }
 
-  const items = [...extractActiveItemsFromLs({ trajectories, backgroundTasks, terminals }), ...procItems];
+  const items = [
+    ...extractActiveItemsFromLs({ trajectories, backgroundTasks, terminals, excludeConversationIds }),
+    ...procItems,
+  ];
   return {
     busy: items.length > 0,
     count: items.length,

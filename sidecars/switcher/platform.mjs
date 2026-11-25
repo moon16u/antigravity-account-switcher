@@ -1,10 +1,21 @@
 import { execFileSync, spawn } from 'node:child_process';
-import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import {
+  existsSync,
+  lstatSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { basename, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 
 const GOOGLE_AUTH_PREFIX = 'https://accounts.google.com/o/oauth2/v2/auth?';
-const MAX_APP_STORAGE_BYTES = 2 * 1024 * 1024;
+const MAX_APP_STORAGE_BYTES = 8 * 1024 * 1024;
 const WSL_SYSTEM32 = '/mnt/c/Windows/System32';
 const RELAUNCH_STRIP_ENV_KEYS = new Set([
   'ELECTRON_RUN_AS_NODE',
@@ -237,6 +248,67 @@ export function readRunInBackgroundSetting(env = process.env, runtime = detectRu
     return defaultVal;
   } catch {
     return defaultVal;
+  }
+}
+
+export function syncOnboardingLastLoginUsername(
+  targetEmail,
+  env = process.env,
+  runtime = detectRuntime(env),
+  { storagePath = '', maxBytes = MAX_APP_STORAGE_BYTES } = {}
+) {
+  const cleanEmail = typeof targetEmail === 'string' ? targetEmail.trim() : '';
+  if (!cleanEmail) {
+    return { updated: false, reason: 'EMPTY_EMAIL' };
+  }
+
+  const targetPath = storagePath || resolveAppStoragePath(env, runtime);
+  if (!targetPath) {
+    return { updated: false, reason: 'NO_STORAGE_PATH' };
+  }
+
+  try {
+    const st = lstatSync(targetPath);
+    if (st.isSymbolicLink() || !st.isFile() || st.size > maxBytes) {
+      return { updated: false, reason: 'MISSING_OR_UNSAFE' };
+    }
+  } catch {
+    return { updated: false, reason: 'MISSING_OR_UNSAFE' };
+  }
+
+  let obj;
+  try {
+    obj = JSON.parse(readFileSync(targetPath, 'utf8'));
+  } catch {
+    return { updated: false, reason: 'INVALID_JSON' };
+  }
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
+    return { updated: false, reason: 'INVALID_JSON' };
+  }
+
+  const hasAgy = Object.prototype.hasOwnProperty.call(obj, 'agy.onboarding.lastLoginUsername');
+  const hasJetski = Object.prototype.hasOwnProperty.call(obj, 'jetski.onboarding.lastLoginUsername');
+  if (!hasAgy && !hasJetski) {
+    return { updated: false, reason: 'NO_PRIOR_ACCEPTANCE' };
+  }
+
+  obj['agy.onboarding.lastLoginUsername'] = cleanEmail;
+  obj['agy.onboarding.lastLoginIsGcpTos'] = 'false';
+  delete obj['jetski.onboarding.lastLoginUsername'];
+  delete obj['jetski.onboarding.lastLoginIsGcpTos'];
+
+  const tmpPath = join(dirname(targetPath), `.tmp-onboarding-${randomUUID()}`);
+  try {
+    writeFileSync(tmpPath, JSON.stringify(obj, null, 2) + '\n', { encoding: 'utf8', flag: 'wx' });
+    renameSync(tmpPath, targetPath);
+    return { updated: true, reason: 'UPDATED' };
+  } catch {
+    try {
+      unlinkSync(tmpPath);
+    } catch {
+      // Ignore cleanup error
+    }
+    return { updated: false, reason: 'WRITE_FAILED' };
   }
 }
 
