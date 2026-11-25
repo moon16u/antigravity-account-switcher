@@ -1,4 +1,4 @@
-[English](README.md) | 简体中文
+[English](README.md) | 简体中文 | [更新日志](CHANGELOG.zh-CN.md)
 
 # Antigravity Account Switcher（Antigravity 多账号切换插件）
 
@@ -181,6 +181,7 @@
 - `sidecars/switcher/switcher-worker.mjs` — 脱离进程树的独立切号与重启执行器
 - `sidecars/switcher/public/` — 侧栏 Web UI（`index.html`、`app.js`、`styles.css`）
 - `sidecars/switcher/test/` — 全隔离单元测试与集成测试套件（`switcher.test.mjs`、`mcp-and-hook.test.mjs`）
+- `CHANGELOG.md` / `CHANGELOG.zh-CN.md` — 中英文双语版本更新日志
 
 ## 验证与测试
 

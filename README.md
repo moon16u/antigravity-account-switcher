@@ -1,4 +1,4 @@
-English | [简体中文](README.zh-CN.md)
+English | [简体中文](README.zh-CN.md) | [Changelog](CHANGELOG.md)
 
 # Antigravity Account Switcher
 
@@ -181,6 +181,7 @@ Runtime data is completely separated from plugin source files. Under Antigravity
 - `sidecars/switcher/switcher-worker.mjs` — Detached switch and desktop restart worker
 - `sidecars/switcher/public/` — Auxiliary-pane web UI (`index.html`, `app.js`, `styles.css`)
 - `sidecars/switcher/test/` — Isolated unit and integration test suites (`switcher.test.mjs`, `mcp-and-hook.test.mjs`)
+- `CHANGELOG.md` / `CHANGELOG.zh-CN.md` — Bilingual release changelog (English / Simplified Chinese)
 
 ## Running Tests
 
