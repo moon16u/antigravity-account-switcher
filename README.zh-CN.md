@@ -24,7 +24,7 @@
 
 ## 功能特性
 
-- **当前账号状态识别与脱敏展示**：在 **macOS**（Keychain `gemini`/`antigravity`）与 **桌面 Linux**（存在 `DBUS_SESSION_BUS_ADDRESS` 时通过 `secret-tool`）自动读取系统凭据库，在 **WSL2** 与无桌面凭据库环境读取 `~/.gemini/jetski-standalone-oauth-token`；在 **Windows 原生**下零 PowerShell 子进程（避免触发安全软件拦截），结合 `LanguageServerService/GetUserStatus` RPC 与加密凭据库直接展示当前已登录账号状态，并通过「**+ 添加账号**」走官方原生 Google 登录纳入切换列表。邮箱默认脱敏显示（支持顶部一键切换完整邮箱显示）。
+- **当前账号状态识别与脱敏展示**：在 **macOS**（Keychain `gemini`/`antigravity`）与 **桌面 Linux**（存在 `DBUS_SESSION_BUS_ADDRESS` 时通过 `secret-tool`）自动读取系统凭据库，在 **WSL2** 与无桌面凭据库环境读取 `~/.gemini/jetski-standalone-oauth-token`；在 **Windows 原生**下，面板结合 `LanguageServerService/GetUserStatus` RPC 与加密凭据库识别当前账号。完成原生登录后，点击「**保存当前账号**」即可将其加入切换列表。邮箱默认脱敏显示（支持顶部一键切换完整邮箱显示）。
 - **官方原生登录添加账号（`+ 添加账号`）**——唯一且主要的添加账号流程：
   - 点击「**+ 添加账号**」后，插件会将当前活跃凭证备份到加密凭据库与 `last-token.enc.json`，清除当前 token，并以未登录状态重启 Antigravity。
   - 在 Antigravity 官方窗口内完成 Google 登录，回到面板后点击「**保存当前账号**」，即可将新的登录态加密入库。
@@ -63,7 +63,7 @@
 1. **仅支持个人消费者账号**：只支持个人版 Google 账号（`auth_method: "consumer"`），企业版 / Google Workspace SSO 凭据会被拒绝。
 2. **切换账号需要重启桌面应用**：Antigravity 的登录态常驻于运行中的 `language_server` 进程内，切号必须先退出桌面端、等待 `language_server` 落盘退出后再替换凭据并重新打开窗口。切号前请先结束或确认运行中的对话/终端任务。
 3. **跨平台实测范围与 Windows 凭据读取策略**：
-   - **Windows 原生**与 **WSL2 + Windows 宿主**已完成真机端到端实测。为避免触发杀毒软件拦截，Windows 原生端刻意不调用 PowerShell 读取凭据管理器，因此请通过「**+ 添加账号**」走官方原生 Google 登录来纳入或新增账号。
+   - **Windows 原生**与 **WSL2 + Windows 宿主**已完成真机端到端实测。Windows 原生端加载或刷新面板时不启动任何子进程。点击「**保存当前账号**」，或在切换账号及「**+ 添加账号**」前备份时，若本地令牌文件不存在，插件会按需读取 Windows 凭据管理器中的 `gemini:antigravity`。若所有读取方式均失败，操作会在重启前停止。
    - **Linux 桌面**与 **macOS** 已在 GitHub Actions CI（`ubuntu-latest`、`macos-latest`）通过全套单元测试与集成测试，其中 **macOS** 真实桌面环境的实际切号重启流程暂未在物理 Mac 上手动验证，欢迎 macOS 用户反馈或提 PR。
 4. **仅支持官方原生登录，不提供浏览器 OAuth 兜底**：添加账号依赖 Antigravity / Google 官方登录流程。0.4.0 不提供浏览器 OAuth 兜底、不启动 PKCE 回环监听、也不做运行时二进制提取；若你的环境无法完成 Google 登录，插件无法添加该账号。`ANTIGRAVITY_AGENTAPI_EXE` 仅用于覆盖本地 RPC / 重启相关可执行文件路径，与 OAuth 客户端提取无关。
 5. **插件/标签页外层标题为静态英文**：Antigravity 宿主目前的 `plugin.json` 与 `sidecar.json` 清单仅支持静态字符串（不支持随系统语言动态切换清单标题），因此插件管理页与右侧标签页统一显示为 **`Account Switcher`**，面板内部文案可自由切换 **`中 / EN`**。
@@ -162,7 +162,8 @@
 - **严格响应头与无注入前端**：HTTP 响应附带 `Content-Security-Policy`（`default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'self'`）、`X-Content-Type-Options: nosniff`、`Cache-Control: no-store`、`Referrer-Policy: no-referrer` 与 `Permissions-Policy`。前端全部使用 `textContent` 与标准 DOM API 构建，无 `innerHTML`、`eval` 或内联脚本/样式。
 - **加密完整性校验（Fail-Closed）**：每条密文均采用 AES-256-GCM 配合 12 字节随机 IV 与 16 字节认证标签，任何篡改都会直接拒绝解密。
 - **文件系统与进程安全**：对敏感文件及目录执行 `lstatSync` 符号链接拦截与 `assertInsideDir` 边界校验，采用临时文件 + `renameSync` 原子落盘，严格校验 UUID 与过滤原型链污染键（`__proto__`、`constructor`、`prototype`）；子进程调用一律使用 `execFileSync` / `spawn` 参数数组（禁用 `shell: true`），子进程检测仅记录可执行文件名与 PID 以避免命令行参数泄露。
-- **仅本地网络与最小 OAuth 面**：插件不向 Google API 发起任何出站 HTTPS 连接，不执行 OAuth 令牌交换，也不托管 OAuth 回调监听。唯一的 HTTP 客户端路径是本地 `language_server` RPC，且仅允许回环主机并携带宿主 CSRF token。Hook 不执行网络或 RPC 调用：`PostInvocation` 仅写入节流触发文件，`PreInvocation` 仅读取脱敏本地快照并更新本地去重状态。凭据提取、浏览器 PKCE、远端等级同步与远端配额调用均已在设计上移除。
+- **Windows 原生凭据读取**优先通过 Python `ctypes` 调用 `CredReadW`。若 Python 无法完成读取，插件依次尝试 `pwsh` 和 `powershell.exe`，使用普通 `-Command`，不使用 `-WindowStyle Hidden` 或 `-EncodedCommand`。一旦确认条目不存在，即结束查询。
+- **仅本地网络与最小 OAuth 面**：插件不向 Google API 发起任何出站 HTTPS 连接，不执行 OAuth 令牌交换，也不托管 OAuth 回调监听。唯一的 HTTP 客户端路径是本地 `language_server` RPC，且仅允许回环主机并携带宿主 CSRF token。Hook 不执行网络或 RPC 调用：`PostInvocation` 仅写入节流触发文件，`PreInvocation` 仅读取脱敏本地快照并更新本地去重状态。从二进制提取 OAuth 客户端信息、浏览器 PKCE、远端等级同步与远端配额调用均已在设计上移除。
 
 ## 仓库结构
 
@@ -179,7 +180,7 @@
 - `sidecars/switcher/quota-snapshots.mjs` — 本地配额快照缓存、活跃账号 `language_server` 查询、重置时间投影与超过 24 小时的陈旧检测
 - `sidecars/switcher/platform.mjs` — 跨平台运行时检测、路径转换、`language_server` / `agentapi` 发现、引导状态同步与桌面端重启
 - `sidecars/switcher/vault.mjs` — AES-256-GCM 凭据库、原子写入、符号链接/路径边界防护与凭证标准化
-- `sidecars/switcher/token-store.mjs` — 跨平台凭据读写层（macOS Keychain / Linux Secret Service、Windows `cmdkey.exe` + 文件交接与 WSL2 文件存储）
+- `sidecars/switcher/token-store.mjs` — 跨平台凭据读写层（macOS Keychain / Linux Secret Service、Windows 凭据管理器按需读取与 `cmdkey.exe` / 文件交接与 WSL2 文件存储）
 - `sidecars/switcher/active-work.mjs` — 切号前回环 RPC 与用户子进程活跃探测器
 - `sidecars/switcher/switcher-worker.mjs` — 脱离进程树的独立切号、原生重新登录与重启执行器
 - `sidecars/switcher/public/` — 侧栏 Web UI（`index.html`、`app.js`、`styles.css`）

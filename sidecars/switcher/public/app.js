@@ -31,7 +31,7 @@
       captureLabelPlaceholder: '给当前账号起个备注名（可选，如 主号）',
       captureBtn: '保存当前账号',
       unsavedPromptFile: '检测到当前登录账号（{email}{tier}）尚未保存到切换列表，可输入备注后保存：',
-      unsavedPromptKeyring: '当前已登录 {email}{tier}。点击「+ 添加账号」重启 Antigravity，通过官方原生 Google 登录切换或添加账号。',
+      unsavedPromptKeyring: '检测到账号 {email}{tier}。请在 Antigravity 连接后刷新面板。',
       corruptLocalCred: '检测到本地登录凭证格式异常。点击「+ 添加账号」通过官方原生 Google 登录重新登录。',
       emptyAccounts: '暂无已保存账号。点击「+ 添加账号」通过官方原生 Google 登录添加。',
       emptyAccountsWithUnsaved: '可在上方保存当前账号，或点击右上方「+ 添加账号」添加其它账号。',
@@ -133,7 +133,7 @@
       captureLabelPlaceholder: 'Label for current account (optional)',
       captureBtn: 'Save Account',
       unsavedPromptFile: 'Current signed-in account ({email}{tier}) is not in your saved list yet:',
-      unsavedPromptKeyring: 'Signed in as {email}{tier}. Click "+ Add Account" to restart Antigravity and switch or add an account through official native Google sign-in.',
+      unsavedPromptKeyring: 'Account detected ({email}{tier}). Refresh the panel when Antigravity reconnects.',
       corruptLocalCred: 'Local sign-in credentials are invalid. Click "+ Add Account" to sign in again through official native Google sign-in.',
       emptyAccounts: 'No saved accounts yet. Click "+ Add Account" to add one through official native Google sign-in.',
       emptyAccountsWithUnsaved: 'Save the active account above, or click "+ Add Account" to add another.',
@@ -398,6 +398,10 @@
   function pickDisplayEmail(item) {
     if (state.revealEmails && item?.email) return item.email;
     return item?.maskedEmail || '';
+  }
+
+  function canCaptureActiveAccount(active) {
+    return (active.present && active.valid) || (active.lsConnected && Boolean(pickDisplayEmail(active)));
   }
 
   function avatarInitial(acc) {
@@ -811,20 +815,19 @@
     const activeDisplayEmail = pickDisplayEmail(active);
     const tierSuffix = active.tierName ? ` · ${active.tierName}` : '';
 
-    if (active.present && !active.valid) {
+    if (activeDisplayEmail && !hasSavedActive && canCaptureActiveAccount(active)) {
+      banner.className = 'unsaved-banner';
+      infoEl.textContent = t('unsavedPromptFile', { email: activeDisplayEmail, tier: tierSuffix });
+      captureForm.className = 'inline-form';
+      captureBtn.disabled = switching;
+    } else if (active.present && !active.valid) {
       banner.className = 'unsaved-banner unsaved-banner-err';
       infoEl.textContent = t('corruptLocalCred');
       captureForm.className = 'inline-form hidden';
     } else if (activeDisplayEmail && !hasSavedActive) {
       banner.className = 'unsaved-banner';
-      if (active.present && active.valid) {
-        infoEl.textContent = t('unsavedPromptFile', { email: activeDisplayEmail, tier: tierSuffix });
-        captureForm.className = 'inline-form';
-        captureBtn.disabled = switching;
-      } else {
-        infoEl.textContent = t('unsavedPromptKeyring', { email: activeDisplayEmail, tier: tierSuffix });
-        captureForm.className = 'inline-form hidden';
-      }
+      infoEl.textContent = t('unsavedPromptKeyring', { email: activeDisplayEmail, tier: tierSuffix });
+      captureForm.className = 'inline-form hidden';
     } else {
       banner.className = 'unsaved-banner hidden';
       infoEl.textContent = '';
@@ -1178,7 +1181,7 @@
     if (accounts.length === 0) {
       const empty = document.createElement('div');
       empty.className = 'empty-state';
-      empty.textContent = active.present && active.valid ? t('emptyAccountsWithUnsaved') : t('emptyAccounts');
+      empty.textContent = canCaptureActiveAccount(active) ? t('emptyAccountsWithUnsaved') : t('emptyAccounts');
       listEl.replaceChildren(empty);
       return;
     }

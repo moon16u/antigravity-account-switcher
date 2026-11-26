@@ -579,11 +579,19 @@ export function updateAccountSyncFields(paths, updates = []) {
   return updatedCount;
 }
 
+function readActiveTokenForSave(paths, env, tokenStoreOpts) {
+  const activeRaw = readActiveTokenRaw(paths, env, {
+    bypassCache: true, ...tokenStoreOpts, allowWindowsKeyringRead: true,
+  });
+  if (!activeRaw.present && activeRaw.blocked) throw new Error('WINDOWS_KEYRING_READ_BLOCKED');
+  return activeRaw;
+}
+
 export function captureCurrentAccount(
   paths,
   { label = '', fallbackEmail = '', tierName = '', projectId = '', env = process.env, tokenStoreOpts = {} } = {}
 ) {
-  const activeRaw = readActiveTokenRaw(paths, env, { bypassCache: true, ...tokenStoreOpts });
+  const activeRaw = readActiveTokenForSave(paths, env, tokenStoreOpts);
   if (!activeRaw.present) {
     throw new Error('NO_ACTIVE_CREDENTIAL');
   }
@@ -716,7 +724,7 @@ export function prepareSwitchJob(
   const nowIso = now.toISOString();
 
   // Back up and synchronize the current token before replacing or removing it.
-  const activeRaw = readActiveTokenRaw(paths, env, { bypassCache: true, ...tokenStoreOpts });
+  const activeRaw = readActiveTokenForSave(paths, env, tokenStoreOpts);
   if (activeRaw.present && !activeRaw.oversize && activeRaw.raw) {
     const currentRaw = activeRaw.raw;
     const backupEnv = encryptPayload({ v: 1, backedUpAt: nowIso, rawText: currentRaw }, key);

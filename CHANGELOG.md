@@ -24,6 +24,10 @@ Low-Risk Architecture Hardening: the plugin is now fully local-first, makes no d
 - Updated the `PreInvocation` hook to emit level-aware alerts (`soft` wrap-up reminder vs `hard` switch prompt) with per-level conversation deduplication.
 - Renamed the sidebar settings entry to **Advanced Settings** and refreshed it with concise setting titles, hover-only `ⓘ` info/risk tooltips, and right-aligned instant **On / Off** toggle buttons consistent with the Saved Accounts action controls.
 
+### Fixed
+
+- **Save Account** is available on native Windows when the language server identifies an unsaved account. Panel loads start zero child processes. Saving or backing up before a switch or **+ Add Account** reads `gemini:antigravity` from Credential Manager when the token file is missing. The reader prefers Python `ctypes` (`CredReadW`), then tries `pwsh` and `powershell.exe` without `-WindowStyle Hidden` or `-EncodedCommand`.
+
 ### Removed
 
 - Removed all direct remote `v1internal:loadCodeAssist` / `v1internal:retrieveUserQuotaSummary` HTTP calls and custom `antigravity/hub/<ver>` User-Agent construction (`cloudcode.mjs` removed).

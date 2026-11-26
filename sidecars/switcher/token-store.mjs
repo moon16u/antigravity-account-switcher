@@ -93,6 +93,133 @@ export function shouldClearWindowsKeyring(paths, env = process.env, runtime = de
   return true;
 }
 
+export function decodeWindowsCredentialBlob(buf) {
+  const bytes = Buffer.from(buf);
+  if (!bytes.length) return '';
+  const utf16 = (bytes[0] === 0xff && bytes[1] === 0xfe) || (bytes.length % 2 === 0 && bytes.includes(0));
+  const padding = /^[\s\0]+|[\s\0]+$/g;
+  const text = bytes.toString(utf16 ? 'utf16le' : 'utf8').replace(padding, '');
+  const prefix = 'go-keyring-base64:';
+  if (text.startsWith(prefix)) {
+    return Buffer.from(text.slice(prefix.length), 'base64').toString('utf8').replace(padding, '');
+  }
+  return text;
+}
+
+// Both readers use the CREDENTIALW fields through CredentialBlob. Only the
+// two fixed Antigravity targets can be queried. Blobs travel over stdout.
+const WINDOWS_CRED_PYTHON = `
+import base64
+import ctypes as c
+from ctypes import wintypes as w
+
+class Credential(c.Structure):
+    _fields_ = [
+        ('Flags', w.DWORD), ('Type', w.DWORD), ('TargetName', w.LPWSTR),
+        ('Comment', w.LPWSTR), ('LastWritten', w.FILETIME),
+        ('CredentialBlobSize', w.DWORD), ('CredentialBlob', c.c_void_p),
+    ]
+
+api = c.WinDLL('advapi32', use_last_error=True)
+PCredential = c.POINTER(Credential)
+api.CredReadW.argtypes = [w.LPCWSTR, w.DWORD, w.DWORD, c.POINTER(PCredential)]
+api.CredReadW.restype = w.BOOL
+api.CredFree.argtypes = [c.c_void_p]
+api.CredFree.restype = None
+ptr = PCredential()
+for target in ('${WIN_CRED_TARGET}', '${WIN_CRED_TARGET_LEGACY}'):
+    if not api.CredReadW(target, 1, 0, c.byref(ptr)):
+        if c.get_last_error() == 1168:
+            continue
+        raise SystemExit(1)
+    try:
+        cred = ptr.contents
+        blob = c.string_at(cred.CredentialBlob, cred.CredentialBlobSize)
+        print('CRED_B64:' + base64.b64encode(blob).decode('ascii'))
+    finally:
+        api.CredFree(ptr)
+    break
+else:
+    print('CRED_NOT_FOUND')
+`;
+
+const WINDOWS_CRED_POWERSHELL = `
+$ErrorActionPreference = 'Stop'
+Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+
+public static class AntigravityCredential {
+    [StructLayout(LayoutKind.Sequential)]
+    private struct Credential {
+        public uint Flags, Type;
+        public IntPtr TargetName, Comment;
+        public System.Runtime.InteropServices.ComTypes.FILETIME LastWritten;
+        public int CredentialBlobSize;
+        public IntPtr CredentialBlob;
+    }
+
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+    private static extern bool CredReadW(string target, uint type, uint flags, out IntPtr ptr);
+    [DllImport("advapi32.dll", ExactSpelling = true)]
+    private static extern void CredFree(IntPtr ptr);
+
+    public static string Read() {
+        foreach (string target in new string[] { "${WIN_CRED_TARGET}", "${WIN_CRED_TARGET_LEGACY}" }) {
+            IntPtr ptr;
+            if (!CredReadW(target, 1, 0, out ptr)) {
+                int error = Marshal.GetLastWin32Error();
+                if (error == 1168) continue;
+                throw new Win32Exception(error);
+            }
+            try {
+                Credential cred = (Credential)Marshal.PtrToStructure(ptr, typeof(Credential));
+                byte[] blob = new byte[cred.CredentialBlobSize];
+                if (blob.Length > 0) Marshal.Copy(cred.CredentialBlob, blob, 0, blob.Length);
+                return "CRED_B64:" + Convert.ToBase64String(blob);
+            } finally {
+                CredFree(ptr);
+            }
+        }
+        return "CRED_NOT_FOUND";
+    }
+}
+'@
+[AntigravityCredential]::Read()
+`;
+
+export function readWindowsKeyringEntry(env = process.env, { execFn = execFileSync } = {}) {
+  const psArgs = ['-NoProfile', '-NonInteractive', '-Command', WINDOWS_CRED_POWERSHELL];
+  const attempts = [
+    ['python', 'python', ['-c', WINDOWS_CRED_PYTHON]],
+    ['python', 'py', ['-3', '-c', WINDOWS_CRED_PYTHON]],
+    ['python', 'python3', ['-c', WINDOWS_CRED_PYTHON]],
+    ['pwsh', 'pwsh', psArgs],
+    ['powershell', 'powershell.exe', psArgs],
+  ];
+  for (const [backend, command, args] of attempts) {
+    try {
+      const output = String(
+        execFn(command, args, {
+          env, encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 128 * 1024,
+        }) || ''
+      ).replace(/\r/g, '');
+      if (/^CRED_NOT_FOUND$/m.test(output)) {
+        return { ok: true, found: false, raw: '', backend };
+      }
+      const match = /^CRED_B64:((?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?)$/m.exec(output);
+      if (match) {
+        const raw = decodeWindowsCredentialBlob(Buffer.from(match[1], 'base64'));
+        return { ok: true, found: Boolean(raw), raw, backend };
+      }
+    } catch {
+      // exec errors can include credential data from the pipe. Never log them.
+    }
+  }
+  return { ok: false, found: false, raw: '', backend: 'none', blocked: true };
+}
+
 export function clearWindowsKeyringEntry(env = process.env, { execFn = execFileSync } = {}) {
   const dirs = resolveWindowsDirs(env, 'win32');
   const sys32 = dirs.system32 || 'C:\\Windows\\System32';
@@ -241,15 +368,26 @@ export function readActiveTokenRaw(paths, env = process.env, opts = {}) {
     }
   }
 
-  if (!assertNotSymlink(paths.tokenPath)) {
-    return { present: false, raw: '', source: 'none' };
+  if (assertNotSymlink(paths.tokenPath)) {
+    const st = lstatSync(paths.tokenPath);
+    if (st.size > MAX_CREDENTIAL_BYTES) {
+      return { present: true, raw: '', source: 'file', oversize: true };
+    }
+    const raw = readFileSync(paths.tokenPath, 'utf8');
+    return { present: true, raw, source: 'file' };
   }
-  const st = lstatSync(paths.tokenPath);
-  if (st.size > MAX_CREDENTIAL_BYTES) {
-    return { present: true, raw: '', source: 'file', oversize: true };
+
+  if (opts.allowWindowsKeyringRead === true && shouldClearWindowsKeyring(paths, env, runtime)) {
+    const winRes = typeof opts.winKeyringRead === 'function' ? opts.winKeyringRead() : readWindowsKeyringEntry(env);
+    if (winRes?.ok && winRes.raw) {
+      if (Buffer.byteLength(winRes.raw, 'utf8') > MAX_CREDENTIAL_BYTES) {
+        return { present: true, raw: '', source: 'keyring', oversize: true };
+      }
+      return { present: true, raw: winRes.raw, source: 'keyring' };
+    }
+    if (winRes?.blocked) return { present: false, raw: '', source: 'keyring', blocked: true };
   }
-  const raw = readFileSync(paths.tokenPath, 'utf8');
-  return { present: true, raw, source: 'file' };
+  return { present: false, raw: '', source: 'none' };
 }
 
 export function writeActiveTokenRaw(paths, rawJson, env = process.env, opts = {}) {

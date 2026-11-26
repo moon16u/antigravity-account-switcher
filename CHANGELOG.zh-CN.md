@@ -24,6 +24,10 @@
 - `PreInvocation` Hook 改为分级提醒（`soft` 收尾提醒 / `hard` 切号提示），并按会话与级别去重。
 - 侧栏设置项更名为 **高级设置**，并采用精简的设置标题、仅在悬停时显示的 `ⓘ` 信息/风险提示，以及右对齐的即时「开启 / 关闭」切换按钮，与「已保存账号」卡片的操作控件保持一致。
 
+### 修复
+
+- Windows 原生端通过语言服务器识别出尚未保存的账号后，即可点击「**保存当前账号**」。面板加载时不启动任何子进程。保存账号、切号或「**+ 添加账号**」前备份时，若令牌文件不存在，插件会从凭据管理器按需读取 `gemini:antigravity`。优先使用 Python `ctypes`（`CredReadW`），失败后依次尝试 `pwsh` 和 `powershell.exe`，不使用 `-WindowStyle Hidden` 或 `-EncodedCommand`。
+
 ### 移除
 
 - 移除所有直接请求远端 `v1internal:loadCodeAssist` / `v1internal:retrieveUserQuotaSummary` 的 HTTP 调用及自定义 `antigravity/hub/<ver>` User-Agent 构造（删除 `cloudcode.mjs`）。

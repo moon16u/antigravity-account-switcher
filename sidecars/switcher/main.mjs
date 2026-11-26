@@ -52,6 +52,7 @@ const ERROR_MESSAGES = Object.freeze({
   INVALID_AUTH_METHOD: '仅支持个人版（consumer）OAuth 凭证。',
   MISSING_ACCOUNT_EMAIL: '未能识别该凭证所属邮箱，请重试。',
   NO_ACTIVE_CREDENTIAL: '当前未检测到有效的本机登录凭证。',
+  WINDOWS_KEYRING_READ_BLOCKED: '未能读取 Windows 凭据管理器中的当前登录态（可能被安全软件拦截），请放行读取或安装 Python 后重试。',
   INVALID_ACCOUNT_ID: '账号标识无效。',
   ACCOUNT_NOT_FOUND: '未找到对应的已保存账号，请刷新列表。',
   UNSAFE_FILE_TYPE: '检测到不安全的符号链接或非常规文件，已拒绝操作。',

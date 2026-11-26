@@ -51,9 +51,12 @@ import {
 import {
   clearWindowsKeyringEntry,
   decodeMacKeychainSecret,
+  decodeWindowsCredentialBlob,
   KEYRING_SERVICE,
   KEYRING_USER,
+  MAX_CREDENTIAL_BYTES,
   readActiveTokenRaw,
+  readWindowsKeyringEntry,
   removeActiveTokenRaw,
   shouldClearWindowsKeyring,
   shouldUseOsKeyring,
@@ -1055,6 +1058,138 @@ test('token-store: OS keyring & Windows cmdkey routing, cmdkey invocation, and m
   assert.equal(decodeMacKeychainSecret(Buffer.from(b64Payload, 'utf8').toString('hex')), '{"k":"v"}');
 });
 
+test('Windows credential blob decoding handles UTF-8, UTF-16LE, padding and go-keyring wrappers', () => {
+  const raw = '{"label":"测试"}';
+  assert.equal(decodeWindowsCredentialBlob(Buffer.alloc(0)), '');
+  assert.equal(decodeWindowsCredentialBlob(new Uint8Array(Buffer.from(raw))), raw);
+  assert.equal(decodeWindowsCredentialBlob(Buffer.from('\uFEFF \n' + raw + '\t')), raw);
+  assert.equal(decodeWindowsCredentialBlob(Buffer.from(raw, 'utf16le')), raw);
+  assert.equal(decodeWindowsCredentialBlob(Buffer.from('\uFEFF ' + raw + '\0 \0', 'utf16le')), raw);
+  const wrapped = 'go-keyring-base64:' + Buffer.from('\uFEFF' + raw + '\0\n').toString('base64');
+  assert.equal(decodeWindowsCredentialBlob(Buffer.from(wrapped)), raw);
+});
+
+test('Windows credential readers stop on an explicit result and fall back only on backend failures', () => {
+  const raw = '{"source":"fixture"}';
+  const found = 'CRED_B64:' + Buffer.from(raw).toString('base64') + '\r\n';
+  const commands = ['python', 'py', 'python3', 'pwsh', 'powershell.exe'];
+  for (const [workingCommand, marker, expectedRaw, backend] of [
+    ['python', found, raw, 'python'],
+    ['python', 'CRED_NOT_FOUND\r\n', '', 'python'],
+    ['py', found, raw, 'python'],
+    ['python3', found, raw, 'python'],
+    ['pwsh', found, raw, 'pwsh'],
+    ['pwsh', 'CRED_NOT_FOUND\r\n', '', 'pwsh'],
+    ['powershell.exe', found, raw, 'powershell'],
+    ['powershell.exe', 'CRED_B64:\r\n', '', 'powershell'],
+    [null, null, '', 'none'],
+  ]) {
+    const calls = [];
+    const result = readWindowsKeyringEntry({}, {
+      execFn(command, args, options) {
+        calls.push({ command, args, options });
+        if (command === workingCommand) return marker;
+        if (command === 'python') return 'Python was not found. Install it from the Microsoft Store.';
+        if (command === 'py') return 'CRED_B64:invalid!';
+        throw new Error('backend unavailable');
+      },
+    });
+    const expectedCommands = workingCommand ? commands.slice(0, commands.indexOf(workingCommand) + 1) : commands;
+    assert.deepEqual(calls.map(call => call.command), expectedCommands);
+    for (const { command, args, options } of calls) {
+      const flags = args.slice(0, -1);
+      if (command === 'pwsh' || command === 'powershell.exe') {
+        assert.deepEqual(flags, ['-NoProfile', '-NonInteractive', '-Command']);
+      } else {
+        assert.deepEqual(flags, command === 'py' ? ['-3', '-c'] : ['-c']);
+      }
+      assert.match(args.at(-1), /CredReadW/);
+      assert.match(args.at(-1), /CredFree/);
+      assert.ok(args.at(-1).includes(WIN_CRED_TARGET_LEGACY));
+      assert.doesNotMatch(args.join(' '), /-WindowStyle|-EncodedCommand/i);
+      assert.equal(options.encoding, 'utf8');
+      assert.equal(options.timeout, 5000);
+      assert.equal(options.maxBuffer, 128 * 1024);
+      assert.deepEqual(options.stdio, ['ignore', 'pipe', 'pipe']);
+      assert.ok(!options.windowsHide);
+    }
+    if (workingCommand) {
+      assert.deepEqual(result, { ok: true, found: Boolean(expectedRaw), raw: expectedRaw, backend });
+    } else {
+      assert.deepEqual(result, { ok: false, found: false, raw: '', backend, blocked: true });
+    }
+  }
+});
+
+test('Windows state reads stay file-only and only explicit actions can read a missing token from the keyring', (t) => {
+  const { paths } = makeSandbox(t);
+  const keyringPaths = { ...paths, useKeyring: true };
+  const absent = { present: false, raw: '', source: 'none' };
+  let calls = 0;
+  let raw = makeSampleToken('windows@example.com');
+  const opts = {
+    runtime: 'win32',
+    winKeyringRead() {
+      calls++;
+      return { ok: true, raw };
+    },
+  };
+  assert.deepEqual(readActiveTokenRaw(keyringPaths, {}, opts), absent);
+  assert.equal(readActiveToken(keyringPaths, {}, opts).present, false);
+
+  const onDemand = { ...opts, allowWindowsKeyringRead: true };
+  assert.deepEqual(readActiveTokenRaw(paths, {}, onDemand), absent);
+  assert.deepEqual(readActiveTokenRaw(keyringPaths, { SWITCHER_TOKEN_STORE: 'file' }, onDemand), absent);
+  assert.equal(calls, 0);
+  assert.deepEqual(readActiveTokenRaw(keyringPaths, {}, onDemand), { present: true, raw, source: 'keyring' });
+  raw = '测'.repeat(Math.ceil(MAX_CREDENTIAL_BYTES / 3));
+  assert.deepEqual(readActiveTokenRaw(keyringPaths, {}, onDemand), {
+    present: true, raw: '', source: 'keyring', oversize: true,
+  });
+  assert.equal(calls, 2);
+
+  const fileToken = makeSampleToken('file@example.com');
+  writeFileSync(paths.tokenPath, fileToken);
+  assert.deepEqual(readActiveTokenRaw(keyringPaths, {}, onDemand), { present: true, raw: fileToken, source: 'file' });
+  assert.equal(calls, 2);
+});
+
+test('Windows capture distinguishes a blocked read from a missing account and saves a keyring token', (t) => {
+  const { paths } = makeSandbox(t);
+  const keyringPaths = { ...paths, useKeyring: true };
+  const capture = result => captureCurrentAccount(keyringPaths, {
+    env: {}, tokenStoreOpts: { runtime: 'win32', winKeyringRead: () => result },
+  });
+  assert.throws(() => capture({ ok: false, blocked: true }), { message: 'WINDOWS_KEYRING_READ_BLOCKED' });
+  assert.throws(() => capture({ ok: true, found: false, raw: '' }), { message: 'NO_ACTIVE_CREDENTIAL' });
+  assert.equal(existsSync(paths.vaultPath), false);
+  const raw = makeSampleToken('windows@example.com');
+  const saved = capture({ ok: true, found: true, raw });
+  const [account] = loadVault(paths).accounts;
+  assert.equal(account.id, saved.id);
+  assert.deepEqual(JSON.parse(account.tokenRaw), JSON.parse(raw));
+  assert.equal(existsSync(paths.tokenPath), false);
+});
+
+test('Windows new-login backs up the keyring session before restart', (t) => {
+  const { paths } = makeSandbox(t);
+  const keyringPaths = { ...paths, useKeyring: true };
+  const prepare = result => prepareSwitchJob(keyringPaths, {
+    mode: 'new-login', env: {}, tokenStoreOpts: { runtime: 'win32', winKeyringRead: () => result },
+  });
+  assert.throws(() => prepare({ ok: false, blocked: true }), { message: 'WINDOWS_KEYRING_READ_BLOCKED' });
+  assert.equal(existsSync(paths.backupPath), false);
+  const raw = makeSampleToken('outgoing@example.com');
+  const { jobPath } = prepare({ ok: true, found: true, raw });
+  assert.ok(existsSync(jobPath));
+  const backup = JSON.parse(readFileSync(paths.backupPath, 'utf8'));
+  assert.equal(decryptPayload(backup, getOrCreateKey(paths)).rawText, raw);
+  const [account] = loadVault(paths).accounts;
+  assert.equal(account.email, 'outgoing@example.com');
+  assert.deepEqual(JSON.parse(account.tokenRaw), JSON.parse(raw));
+  assert.equal(existsSync(paths.tokenPath), false);
+});
+
 test('token-store: Windows cmdkey clear + file handoff and Darwin/Linux keyring composite behavior', (t) => {
   const { root } = makeSandbox(t);
   const paths = {
@@ -1770,6 +1905,13 @@ test('public UI uses external assets and local quota and native account controls
   assert.match(js, /err\.retryAfterSec\s*=/);
   assert.match(js, /err\?\.status === 429 \|\| err\?\.code === 'RATE_LIMITED'/);
   assert.ok(js.includes('/api/accounts/new-login'));
+  assert.ok(js.includes('(active.present && active.valid) || (active.lsConnected && Boolean(pickDisplayEmail(active)))'));
+  const saveBranch = js.match(/if \(activeDisplayEmail && !hasSavedActive && canCaptureActiveAccount\(active\)\) \{([\s\S]*?)\} else/);
+  assert.ok(saveBranch);
+  assert.ok(saveBranch[1].includes("banner.className = 'unsaved-banner'"));
+  assert.ok(saveBranch[1].includes("captureForm.className = 'inline-form'"));
+  assert.ok(saveBranch[1].includes('captureBtn.disabled = switching'));
+  assert.ok(js.includes("canCaptureActiveAccount(active) ? t('emptyAccountsWithUnsaved')"));
   assert.ok(js.includes('estimatedReset'));
   assert.doesNotMatch(js, /\b(alert|confirm|prompt)\s*\(/);
 });
