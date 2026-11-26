@@ -6,6 +6,13 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本（Semantic Versioning）](https://semver.org/lang/zh-CN/)。
 
+## [0.4.1] - 2026-11-27
+
+### 安全加固
+
+- 移除 MCP `switch_account` 的自定义 `resumeMessage` 参数，将「切号后自动续跑」锁死为内置固定良性唤醒语，阻断间接 Prompt 注入借切号重启在新账号会话中持久化指令的攻击面。
+- 在「安全架构」中补充说明本地单用户 `vault.key` 的威胁模型边界。
+
 ## [0.4.0] - 2026-11-27
 
 低风险本地优先架构重构：彻底移除远端 Google API 直连、运行时二进制 OAuth 提取与空闲后台轮询，收紧 Agent 切号权限边界，并重塑「高级设置」交互体验。
@@ -71,5 +78,6 @@
 
 - 修复 macOS 下 `runInBackground` 默认值测试断言，并修正 CI 中 DER 证书序列号的正数规范编码（`a9e3bd3`）。
 
+[0.4.1]: https://github.com/moon16u/antigravity-account-switcher/releases/tag/v0.4.1
 [0.4.0]: https://github.com/moon16u/antigravity-account-switcher/releases/tag/v0.4.0
 [0.3.0]: https://github.com/moon16u/antigravity-account-switcher/releases/tag/v0.3.0

@@ -6,6 +6,13 @@ All notable changes to **Antigravity Account Switcher** are documented in this f
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-11-27
+
+### Security
+
+- Removed the agent-supplied `resumeMessage` parameter from MCP `switch_account` and locked post-restart auto-resume to a fixed benign wakeup message, closing the indirect prompt-injection persistence vector across account switches.
+- Documented the local single-user `vault.key` threat-model boundary explicitly in **Security Architecture**.
+
 ## [0.4.0] - 2026-11-27
 
 Low-risk, local-first architecture overhaul: eliminates all outbound remote Google API requests, runtime binary OAuth extraction, and idle background polling while tightening Agent permission boundaries and refining the Advanced Settings UI.
@@ -71,5 +78,6 @@ Initial open-source release.
 
 - Fixed macOS `runInBackground` default test assertion and canonical positive DER certificate serial generation in CI (`a9e3bd3`).
 
+[0.4.1]: https://github.com/moon16u/antigravity-account-switcher/releases/tag/v0.4.1
 [0.4.0]: https://github.com/moon16u/antigravity-account-switcher/releases/tag/v0.4.0
 [0.3.0]: https://github.com/moon16u/antigravity-account-switcher/releases/tag/v0.3.0

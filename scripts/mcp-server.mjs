@@ -29,7 +29,8 @@ import {
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const WORKER_SCRIPT = join(__dirname, '..', 'sidecars', 'switcher', 'switcher-worker.mjs');
 const MAX_RPC_BUFFER_BYTES = 2 * 1024 * 1024;
-const SERVER_VERSION = '0.4.0';
+const SERVER_VERSION = '0.4.1';
+const FIXED_RESUME_MESSAGE = '账号已切换完成，请继续刚才未完成的任务。';
 
 export const MCP_TOOLS = Object.freeze([
   {
@@ -98,10 +99,6 @@ export const MCP_TOOLS = Object.freeze([
         reason: {
           type: 'string',
           description: 'Optional short reason recorded in the sanitized switch audit log.',
-        },
-        resumeMessage: {
-          type: 'string',
-          description: 'Optional prompt sent to conversationId after restart when autoResumeEnabled is turned on.',
         },
         force: {
           type: 'boolean',
@@ -476,10 +473,7 @@ export function createMcpHandlers(options = {}) {
         settings.autoResumeEnabled && validCid
           ? {
               conversationId: validCid,
-              message:
-                typeof args.resumeMessage === 'string' && args.resumeMessage.trim()
-                  ? args.resumeMessage.trim()
-                  : '账号已切换完成，请继续刚才未完成的任务。',
+              message: FIXED_RESUME_MESSAGE,
               agentApiExe: String(ctx.lsEnv.ANTIGRAVITY_AGENTAPI_EXE || '').trim(),
             }
           : null;

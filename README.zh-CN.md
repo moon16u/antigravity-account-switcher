@@ -49,7 +49,7 @@
   - **切号前活跃任务护栏**：自动检测运行中的对话、后台任务、活跃终端与用户子进程，有任务运行时暂停并给出「重新检查并切换」「取消」与记入审计日志（`FORCE_SWITCH_REQUESTED`）的「仍要强制切换」。
 - **事件驱动低额度提醒、MCP 工具与「Agent 自主切号」硬权限门禁**：
   - **随对话周期触发**：`PostInvocation` Hook（`hooks.json` → `scripts/quota-hook.mjs`）写入节流触发文件，Sidecar 通过 `fs.watch` 监听并异步更新本地 `quota-alert.json`，空闲挂机严格零请求。`PreInvocation` Hook 毫秒级读取本地快照，按会话动态浮动阈值（`dynamicThresholdEnabled`，默认开启）分级去重注入提醒（**`soft`** 软性收尾提醒 → **`hard`** 硬下限提醒）。
-  - **内置零依赖 stdio MCP 服务（`0.4.0`）与 `/switch-account` 技能**：提供 `get_switcher_status`、`list_accounts`、`get_quota`（活跃账号实时本地 RPC，非活跃账号本地快照推算）与 `switch_account`（`pickBest: true` 基于本地快照挑选最优备用号，无快照时回退至最久未用备用号）。
+  - **内置零依赖 stdio MCP 服务（`0.4.1`）与 `/switch-account` 技能**：提供 `get_switcher_status`、`list_accounts`、`get_quota`（活跃账号实时本地 RPC，非活跃账号本地快照推算）与 `switch_account`（`pickBest: true` 基于本地快照挑选最优备用号，无快照时回退至最久未用备用号）。
   - **「Agent 自主切号」硬权限开关（默认关闭）**：
     - **关闭时**：Agent 仅具备**只读权限**（查询状态、额度与提醒）；MCP 服务层对 `switch_account` 执行 fail-closed 硬拒绝并返回 `AGENT_SWITCH_DISABLED`，同时「**切号后自动续跑**」自动关闭并在界面中置灰禁用。
     - **开启时**：授权 Agent 在低额度硬下限或用户指令下自主切号（仍受活跃任务护栏约束），「**切号后自动续跑**」也可独立开关，在桌面端应用重启就绪后自动唤醒当前会话继续任务。
@@ -144,15 +144,16 @@
 
 - **鉴权与分级限流**：所有接口强制校验宿主注入的 `ANTIGRAVITY_SIDECAR_UI_TOKEN`（缺失时 `403` 拒绝），启用滑动窗口限流（读 `60 次/分`、用量 `30 次/分`、高级设置 `25 次/分` 并返回 `Retry-After`、重型写操作 `10 次/分`）与 `15 秒` 切号互斥锁。
 - **严格 CSP 与无注入前端**：附带严格 `Content-Security-Policy`、`X-Content-Type-Options: nosniff`、`Cache-Control: no-store`、`Referrer-Policy: no-referrer` 与 `Permissions-Policy` 响应头；前端全部使用 `textContent` 与标准 DOM API 构建，零 `innerHTML`、零 `eval`、零内联脚本与样式。
-- **加密完整性校验（Fail-Closed）**：每条密文使用 AES-256-GCM 配合唯一 12 字节随机 IV 与 16 字节认证标签，任何篡改直接拒绝解密。
+- **加密完整性校验与本地威胁边界**：每条密文使用 AES-256-GCM 配合唯一 12 字节随机 IV 与 16 字节认证标签，任何篡改直接拒绝解密。为避免每次切号弹出主密码输入框，`vault.key` 与 `vault.enc.json` 同目录以 `0600` 权限保存在本地——这可防范跨用户读取与误提交泄露，但无法抵御已在本机获得同用户完整执行权限的恶意软件。
+- **自动续跑防提示词注入加固**：MCP `switch_account` 不接受 Agent 传入任意自定义续跑文本；开启「切号后自动续跑」时始终使用内置固定良性唤醒语，防止间接 Prompt 注入借切号重启在新账号会话中持久化执行指令。
 - **文件系统与进程加固**：拒绝敏感路径符号链接（`lstatSync`）、校验目录边界（`assertInsideDir`）、临时文件 + `renameSync` 原子写入、过滤原型链污染键；子进程调用一律使用参数数组（禁用 `shell: true`），活跃子进程提示仅显示可执行文件名与 PID，不泄露命令行参数。
 - **Windows 原生凭据读取**：按需通过 Python `ctypes` 调用 `CredReadW`，不可用时依次回退至普通 `pwsh` / `powershell.exe -Command`（绝不使用 `-WindowStyle Hidden` 或 `-EncodedCommand`）；若备份读取失败会在重启前中止操作。
 - **零外部网络攻击面**：不含任何远端 Google API 客户端、OAuth 回调服务或二进制提取逻辑，仅允许带宿主 CSRF 校验的本机回环 RPC。
 
 ## 仓库结构
 
-- `plugin.json` — 插件清单（`antigravity-account-switcher`，`0.4.0`）
-- `mcp_config.json` / `scripts/mcp-server.mjs` — 内置零依赖 stdio MCP 服务（`0.4.0`）
+- `plugin.json` — 插件清单（`antigravity-account-switcher`，`0.4.1`）
+- `mcp_config.json` / `scripts/mcp-server.mjs` — 内置零依赖 stdio MCP 服务（`0.4.1`）
 - `hooks.json` / `scripts/quota-hook.mjs` — 轻量事件驱动 `PreInvocation` / `PostInvocation` Hook
 - `skills/switch-account/SKILL.md` — 面向 Agent 的 `/switch-account` 技能工作流
 - `sidecars/switcher/main.mjs` — Sidecar HTTP 服务、`fs.watch` 触发刷新、安全门禁与限流

@@ -49,7 +49,7 @@ A cross-platform auxiliary-pane plugin (`SIDECAR_UI_ENTRYPOINT_AUX_PANE`) for **
   - **Active-Work Guard**: checks running conversations, background tasks, terminals, and user child processes before closing the desktop app, pausing with **Recheck & Switch**, **Cancel**, or audited **Force Switch** (`FORCE_SWITCH_REQUESTED`).
 - **Event-Driven Quota Alerts, MCP Tools & Hard Agent Permission Gate**:
   - **Conversation-driven monitoring**: `PostInvocation` (`hooks.json` → `scripts/quota-hook.mjs`) writes a throttled local trigger file watched by the Sidecar via `fs.watch`, updating `quota-alert.json` only during active conversations (zero idle requests). `PreInvocation` reads the local snapshot in milliseconds and injects per-conversation, per-level alerts (**`soft`** wrap-up reminder → **`hard`** switch alert) using per-session jittered thresholds (`dynamicThresholdEnabled`, default on).
-  - **Bundled stdio MCP server (`0.4.0`) & `/switch-account` skill**: exposes `get_switcher_status`, `list_accounts`, `get_quota` (live local RPC for active account, local snapshot projection for inactive accounts), and `switch_account` (`pickBest: true` ranks from local snapshots with least-recently-used unsnapshotted fallback).
+  - **Bundled stdio MCP server (`0.4.1`) & `/switch-account` skill**: exposes `get_switcher_status`, `list_accounts`, `get_quota` (live local RPC for active account, local snapshot projection for inactive accounts), and `switch_account` (`pickBest: true` ranks from local snapshots with least-recently-used unsnapshotted fallback).
   - **Hard Permission Gate (`Agent Autonomous Switch`, default OFF)**:
     - When **OFF**, the Agent is strictly **read-only** (status, quota, low-quota reminders). Calling `switch_account` fails closed at the MCP server with `AGENT_SWITCH_DISABLED`, and **Auto-Resume After Switch** is automatically turned off and greyed out in the UI.
     - When **ON**, the Agent is authorized to switch on request or at the low-quota hard floor (still protected by the active-work guard), and **Auto-Resume After Switch** can be toggled independently to resume your conversation after restart once the new backend is ready.
@@ -144,15 +144,16 @@ Runtime data is isolated from plugin source files under `~/.gemini/antigravity/s
 
 - **Auth Gate & Rate Limits**: Every Sidecar API requires the host-injected `ANTIGRAVITY_SIDECAR_UI_TOKEN` (`403` when missing), enforces sliding-window rate limits (`60/min` reads, `30/min` usage, `25/min` settings with `Retry-After`, `10/min` heavy writes), and guards switches with a `15s` lock.
 - **Strict CSP & DOM-Safe UI**: Serves strict `Content-Security-Policy`, `X-Content-Type-Options: nosniff`, `Cache-Control: no-store`, `Referrer-Policy: no-referrer`, and `Permissions-Policy`. The frontend builds DOM nodes exclusively via `textContent` and `createElement` (zero `innerHTML`, `eval`, or inline scripts/styles).
-- **Authenticated Encryption (Fail-Closed)**: Every encrypted envelope uses AES-256-GCM with a fresh 12-byte IV and 16-byte auth tag; any tampering fails decryption.
+- **Authenticated Encryption & Local Threat Model**: Every encrypted envelope uses AES-256-GCM with a fresh 12-byte IV and 16-byte auth tag; any tampering fails decryption. Note that to avoid master-password prompts on every switch, `vault.key` is stored locally alongside `vault.enc.json` (`0600` on Unix) — this prevents cross-user reads and accidental repo leaks, but cannot defend against malware or rogue processes already running with full same-user permissions.
+- **Prompt-Injection Hardening on Auto-Resume**: MCP `switch_account` does not accept arbitrary agent-supplied resume prompts; when **Auto-Resume After Switch** is enabled, the worker always sends a fixed, benign wakeup message to prevent indirect prompt injection from persisting across account switches.
 - **Filesystem & Process Hardening**: Rejects symlinks (`lstatSync`), enforces directory containment (`assertInsideDir`), writes atomically via temp file + `renameSync`, strips prototype-pollution keys, invokes subprocesses via argument arrays only (never `shell: true`), and strips command-line arguments from active-work reports.
 - **Native Windows Credential Handling**: Uses Python `ctypes` `CredReadW` on demand, falling back to plain `pwsh` / `powershell.exe -Command` without `-WindowStyle Hidden` or `-EncodedCommand`, and stops before restart if backup fails.
 - **Zero External Network Surface**: No outbound Google API clients, no OAuth callback server, and no binary extraction — only loopback `language_server` RPC with host CSRF authentication.
 
 ## Repository Structure
 
-- `plugin.json` — Plugin manifest (`antigravity-account-switcher`, `0.4.0`)
-- `mcp_config.json` / `scripts/mcp-server.mjs` — Bundled zero-dependency stdio MCP server (`0.4.0`)
+- `plugin.json` — Plugin manifest (`antigravity-account-switcher`, `0.4.1`)
+- `mcp_config.json` / `scripts/mcp-server.mjs` — Bundled zero-dependency stdio MCP server (`0.4.1`)
 - `hooks.json` / `scripts/quota-hook.mjs` — Lightweight `PreInvocation` & `PostInvocation` hooks
 - `skills/switch-account/SKILL.md` — `/switch-account` agent workflow skill
 - `sidecars/switcher/main.mjs` — Sidecar HTTP server, `fs.watch` event-driven quota refresh, security gates & rate limits
