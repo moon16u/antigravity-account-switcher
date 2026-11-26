@@ -126,6 +126,21 @@ test('resolvePaths prioritizes sidecar_data over PLUGIN_DATA when present', (t) 
   assert.equal(sharedPaths.hookStatePath, join(sidecarDataDir, 'hook-alert-state.json'));
 });
 
+test('auto-resume requires agent switching and stays off after switching is re-enabled', (t) => {
+  const { paths } = makeSandbox(t);
+  const legacy = { autoSwitchEnabled: false, autoResumeEnabled: true };
+  assert.equal(normalizeGuardSettings(legacy).autoResumeEnabled, false);
+  assert.equal(normalizeGuardSettings({ autoSwitchEnabled: true }, legacy).autoResumeEnabled, false);
+  writeFileSync(paths.settingsPath, JSON.stringify(legacy));
+  assert.equal(loadGuardSettings(paths).autoResumeEnabled, false);
+  assert.equal(saveGuardSettings(paths, { autoResumeEnabled: true }).autoResumeEnabled, false);
+  assert.equal(saveGuardSettings(paths, { autoSwitchEnabled: true }).autoResumeEnabled, false);
+  assert.equal(saveGuardSettings(paths, { autoResumeEnabled: true }).autoResumeEnabled, true);
+  assert.equal(saveGuardSettings(paths, { autoSwitchEnabled: false }).autoResumeEnabled, false);
+  assert.equal(JSON.parse(readFileSync(paths.settingsPath, 'utf8')).autoResumeEnabled, false);
+  assert.equal(saveGuardSettings(paths, { autoSwitchEnabled: true }).autoResumeEnabled, false);
+});
+
 test('quota-guard settings normalization, alert thresholds, and best-backup selection', (t) => {
   const { paths } = makeSandbox(t);
 
@@ -420,6 +435,7 @@ test('quota-hook injects once per conversation, deduplicates, clears on recovery
   const injectedText = firstJson.injectSteps[0].systemMessage.systemMessage;
   assert.equal(injectedText.includes('周额度剩余 9%'), true);
   assert.equal(injectedText.includes('conv-hook-1'), true);
+  assert.match(injectedText, /已开启「Agent 自主切号」：/);
   assert.equal(injectedText.includes('switch_account'), true);
   assert.equal(injectedText.includes('Backup / b***@example.com'), true);
 
@@ -763,7 +779,6 @@ test('both quota hooks are registered and PostInvocation only writes a throttled
 
 test('PreInvocation re-alerts on escalation from soft wrap-up to hard switch and deduplicates each level', (t) => {
   const { env, paths } = makeSandbox(t);
-  saveGuardSettings(paths, { autoSwitchEnabled: true });
   const pre = () => evaluateHookInput({ hookEventName: 'PreInvocation', conversationId: 'conv-escalate' }, env);
   const store = (level, weeklyPercent) => writeQuotaAlertSnapshot(paths, {
     activeAccountId: 'current', triggered: level !== 'ok', level,
@@ -781,8 +796,17 @@ test('PreInvocation re-alerts on escalation from soft wrap-up to hard switch and
   const hard = pre().injectSteps[0].systemMessage;
   assert.equal(hard.metadata.level, 'hard');
   assert.match(hard.systemMessage, /硬性阈值 9%/);
-  assert.match(hard.systemMessage, /switch_account/);
+  assert.match(hard.systemMessage, /当前未开启「Agent 自主切号」（已禁止 Agent 通过 MCP 切号）/);
+  assert.match(hard.systemMessage, /低额度状态及推荐备用号，提醒用户自行在右侧 Account Switcher 面板手动切换账号/);
+  assert.doesNotMatch(hard.systemMessage, /switch_account/);
   assert.match(hard.systemMessage, /按重置时间回升/);
+  writeFileSync(paths.settingsPath, JSON.stringify({ autoSwitchEnabled: false, autoResumeEnabled: true }));
+  assert.deepEqual(pre(), { injectSteps: [] });
+  saveGuardSettings(paths, { autoSwitchEnabled: true, autoResumeEnabled: true });
+  const enabled = pre().injectSteps[0].systemMessage.systemMessage;
+  assert.match(enabled, /已开启「Agent 自主切号」与「切号后自动续跑」/);
+  assert.match(enabled, /switch_account（传入 pickBest: true, conversationId: "conv-escalate"）/);
+  assert.match(enabled, /切勿擅自传 force: true，请先询问用户确认/);
   assert.deepEqual(pre(), { injectSteps: [] });
   store('ok', 90);
   assert.deepEqual(pre(), { injectSteps: [] });
@@ -841,6 +865,9 @@ test('MCP stdio initializes at 0.4.0 and supports newline and Content-Length fra
   assert.deepEqual(messages.map(m => [m.msg.id, m.framing]), [[1, 'line'], [2, 'line'], [3, 'content-length']]);
   assert.equal(messages[0].msg.result.serverInfo.version, '0.4.0');
   assert.equal(messages[1].msg.result.tools.length, 4);
+  const switchTool = messages[1].msg.result.tools.find(tool => tool.name === 'switch_account');
+  assert.match(switchTool.description, /Agent Autonomous Switch \(autoSwitchEnabled\) in Advanced Settings/);
+  assert.match(switchTool.description, /off by default.*AGENT_SWITCH_DISABLED/);
   assert.equal(JSON.parse(messages[2].msg.result.content[0].text).accountCount, 1);
 });
 
@@ -877,6 +904,30 @@ test('MCP get_quota(includeAll) reads live quota once and projects inactive acco
   assert.deepEqual(opts.body, { forceRefresh: true });
 });
 
+test('MCP switch_account fails closed by default before discovery, quota capture, active-work checks, or job creation', async (t) => {
+  const discoverLiveHub = t.mock.fn();
+  const detectActiveWork = t.mock.fn();
+  const capturePreSwitchSnapshot = t.mock.fn();
+  const spawnWorker = t.mock.fn();
+  const { paths, add, rpc, call } = mcpFixture(t, {
+    discoverLiveHub, detectActiveWork, spawnWorker, quotaService: { capturePreSwitchSnapshot },
+  });
+  const backup = add('backup');
+  for (const args of [{ accountId: backup.id }, { pickBest: true, force: true }]) {
+    const result = await call('switch_account', args, { error: true });
+    assert.deepEqual(result, {
+      ok: false,
+      code: 'AGENT_SWITCH_DISABLED',
+      message: 'Agent Autonomous Switch is disabled in Advanced Settings. Ask the user to switch accounts manually in the sidebar or enable "Agent Autonomous Switch" first.',
+    });
+  }
+  for (const mock of [discoverLiveHub, rpc, detectActiveWork, capturePreSwitchSnapshot, spawnWorker]) {
+    assert.equal(mock.mock.callCount(), 0);
+  }
+  assert.equal(existsSync(paths.jobsDir), false);
+  assert.equal(existsSync(paths.quotaSnapshotsPath), false);
+});
+
 test('MCP pickBest selects the highest projected quota and persists outgoing quota before worker dispatch', async (t) => {
   let otherBusy = true;
   const { paths, add, jobs, rpc, call, snapshot } = mcpFixture(t, {
@@ -892,7 +943,7 @@ test('MCP pickBest selects the highest projected quota and persists outgoing quo
   add('unsnapshotted');
   snapshot(healthy, geminiQuota(0.82, 0.8));
   snapshot(reset, geminiQuota(0.01, 0.95, '2020-01-01T00:00:00Z'));
-  saveGuardSettings(paths, { autoResumeEnabled: true, skipOnboardingPrompt: true });
+  saveGuardSettings(paths, { autoSwitchEnabled: true, autoResumeEnabled: true, skipOnboardingPrompt: true });
   const args = { pickBest: true, conversationId: 'conv-self', reason: 'low quota' };
   assert.equal((await call('switch_account', args, { error: true })).code, 'ACTIVE_WORK_RUNNING');
   assert.equal(rpc.mock.callCount(), 0);
@@ -924,7 +975,7 @@ test('MCP pickBest falls back to least recently used unsnapshotted backup and re
     acc.lastUsedAt = acc.id === oldest.id ? '2023-01-01T00:00:00Z' : '2024-01-01T00:00:00Z';
   }
   saveVault(paths, vault);
-  saveGuardSettings(paths, { naturalPauseEnabled: false });
+  saveGuardSettings(paths, { autoSwitchEnabled: true, naturalPauseEnabled: false });
   snapshot(depleted, geminiQuota(0.04));
   const result = await call('switch_account', { pickBest: true });
   assert.equal(result.selectionSource, 'unsnapshotted-fallback');

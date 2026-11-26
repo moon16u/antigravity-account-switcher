@@ -1888,8 +1888,25 @@ test('public UI uses external assets and local quota and native account controls
     }
     assert.match(buttons[0], /\sdata-value\s*=\s*(["'])false\1/);
     assert.match(buttons[1], /\sdata-value\s*=\s*(["'])true\1/);
+    if (id === 'guard-auto-resume') {
+      assert.match(group[1], /\saria-disabled="true"/);
+      assert.match(buttons[0], /\saria-checked="true"/);
+      assert.match(buttons[1], /\saria-checked="false"/);
+      for (const button of buttons) assert.match(button, /\sdisabled\b/);
+    }
     assert.ok(js.includes(id));
   }
+  assert.match(html, /id="guard-auto-resume-row"[^>]*\bguard-row-disabled\b/);
+  const resumeTipButton = html.match(/<button\b[^>]*aria-describedby="guard-auto-resume-tip"[^>]*>/);
+  assert.ok(resumeTipButton);
+  assert.doesNotMatch(resumeTipButton[0], /\sdisabled\b/);
+  assert.ok(js.includes('guard-auto-resume-row'));
+  assert.ok(js.includes('guard-row-disabled'));
+  assert.match(css, /\.guard-row-disabled \.guard-row-label > span:first-child\s*\{\s*color: var\(--sw-fg-faint\)/);
+  assert.match(css, /\.guard-row-disabled \.guard-segmented\s*\{\s*opacity: 0\.52/);
+  assert.match(html, /id="guard-auto-switch-label">Agent 自主切号</);
+  assert.match(js, /guardAutoSwitchLabel: 'Agent 自主切号'/);
+  assert.match(js, /guardAutoSwitchLabel: 'Agent Autonomous Switch'/);
   const posSkipOnboarding = html.search(/\sid\s*=\s*(["'])guard-skip-onboarding\1/);
   const posAutoSwitch = html.search(/\sid\s*=\s*(["'])guard-auto-switch\1/);
   const posAutoResume = html.search(/\sid\s*=\s*(["'])guard-auto-resume\1/);

@@ -19,6 +19,7 @@
 
 ### 变更
 
+- **Agent 自主切号**（`Agent Autonomous Switch`，`autoSwitchEnabled`，默认关闭）现作为 MCP 层硬性、失败关闭（fail-closed）的权限门禁：关闭时 Agent 仅保留只读权限（状态、配额与低额度提醒），`switch_account` 会在 MCP 服务层以 `AGENT_SWITCH_DISABLED` 拒绝执行。**切号后自动续跑**（`Auto-Resume After Switch`）与该门禁联动：自主切号关闭时，该选项会被自动关闭并在界面中置灰禁用；开启后，Agent 可在用户明确要求时或触及低额度硬下限时执行切号（仍受活跃任务检测护栏约束），**切号后自动续跑** 也可独立开关。
 - 将原生登录提升为唯一且主要的添加账号流程（`+ 添加账号` → 备份当前账号、重启进入官方 Google 登录，登录后点击「保存当前账号」）。
 - MCP 服务（`0.4.0`）的 `get_quota` 与 `switch_account`（`pickBest: true`）改为使用本地快照 + 重置时间投影（并附「最近最少使用且无快照」的备用号回退），同时在切号前采集当前账号快照。
 - `PreInvocation` Hook 改为分级提醒（`soft` 收尾提醒 / `hard` 切号提示），并按会话与级别去重。

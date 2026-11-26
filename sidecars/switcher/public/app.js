@@ -92,10 +92,10 @@
       guardDynamicThresholdTip: '低风险：每次会话在基准阈值附近自动浮动，先提示收尾再进入切号，减少固定阈值特征。',
       guardNaturalPauseLabel: '切号自然停顿',
       guardNaturalPauseTip: '低风险：关闭桌面端应用并更新登录态后，随机停顿 3–8 秒再重新启动。',
-      guardAutoSwitchLabel: 'Agent 自动切号',
-      guardAutoSwitchTip: '中风险：仅在无其他并发会话或任务时自动切号；高频无人值守切换会增加账号关联风险，建议按需开启。',
+      guardAutoSwitchLabel: 'Agent 自主切号',
+      guardAutoSwitchTip: '中风险：关闭时禁止 Agent 切号；开启后授权 Agent 在低额度或指令下自主切号（仅在无其他并发会话或任务时生效），高频切换可能增加账号关联风险。',
       guardAutoResumeLabel: '切号后自动续跑',
-      guardAutoResumeTip: '中风险：桌面端应用重启就绪后自动唤醒当前会话继续任务，建议配合 Agent 自动切号使用。',
+      guardAutoResumeTip: '中风险：桌面端应用重启就绪后自动唤醒当前会话继续任务；需开启「Agent 自主切号」后才可启用。',
       guardSkipOnboardingLabel: '跳过重复条款弹窗',
       guardSkipOnboardingTip: '低风险：切号时同步更新本地引导记录，减少重复弹出的条款确认窗；关闭则不改动应用配置。',
       guardInfoLabel: '设置说明',
@@ -194,10 +194,10 @@
       guardDynamicThresholdTip: 'Low risk: Varies soft wrap-up and switch thresholds slightly per session around the base value.',
       guardNaturalPauseLabel: 'Natural Relaunch Pause',
       guardNaturalPauseTip: 'Low risk: Waits a random 3–8 seconds after closing the desktop app before relaunching.',
-      guardAutoSwitchLabel: 'Agent Auto-Switch',
-      guardAutoSwitchTip: 'Medium risk: Switches automatically only when no other sessions or tasks are running; frequent unattended switching may increase account-linkage risk.',
+      guardAutoSwitchLabel: 'Agent Autonomous Switch',
+      guardAutoSwitchTip: 'Medium risk: Blocks Agent switching when off; when on, allows the Agent to switch accounts on low quota or request (only when no other sessions or tasks are running). Frequent switching may increase account-linkage risk.',
       guardAutoResumeLabel: 'Auto-Resume After Switch',
-      guardAutoResumeTip: 'Medium risk: Automatically resumes the current conversation after the desktop app restarts; best used with Agent Auto-Switch.',
+      guardAutoResumeTip: 'Medium risk: Automatically resumes the current conversation after the desktop app restarts; requires "Agent Autonomous Switch" to be enabled.',
       guardSkipOnboardingLabel: 'Skip Repeated Onboarding Modal',
       guardSkipOnboardingTip: 'Low risk: Updates the local onboarding state on switch to reduce repeated terms prompts; leave off to avoid modifying app settings.',
       guardInfoLabel: 'Setting details',
@@ -1198,12 +1198,18 @@
   function renderGuardSettings() {
     const disabled = guardSettingsDisabled();
     const settings = { ...state.data?.settings, ...state.guardPatch };
+    const autoSwitchEnabled = Boolean(settings.autoSwitchEnabled);
+    settings.autoResumeEnabled = autoSwitchEnabled && Boolean(settings.autoResumeEnabled);
+    el('guard-auto-resume-row').classList.toggle('guard-row-disabled', !autoSwitchEnabled);
     for (const [id, key, fallback = false] of GUARD_TOGGLES) {
+      const group = el(id);
+      const groupDisabled = disabled || (key === 'autoResumeEnabled' && !autoSwitchEnabled);
+      group.setAttribute('aria-disabled', String(groupDisabled));
       const enabled = Boolean(settings[key] ?? fallback);
-      for (const button of el(id).querySelectorAll('.guard-seg-btn')) {
+      for (const button of group.querySelectorAll('.guard-seg-btn')) {
         const value = button.dataset.value === 'true';
         const selected = value === enabled;
-        button.disabled = disabled;
+        button.disabled = groupDisabled;
         button.setAttribute('aria-checked', String(selected));
         button.tabIndex = selected ? 0 : -1;
         button.textContent = t(value ? 'guardOn' : 'guardOff');
@@ -1256,18 +1262,23 @@
 
   async function saveGuardSetting(key, value) {
     if (guardSettingsDisabled()) return;
+    const effectiveAutoSwitchEnabled = state.guardPatch.autoSwitchEnabled ?? state.data.settings.autoSwitchEnabled;
+    if (key === 'autoResumeEnabled' && value === true && !effectiveAutoSwitchEnabled) return;
     if (Object.hasOwn(state.guardPatch, key)) {
       renderGuardSettings();
       return;
     }
-    state.guardPatch[key] = value;
+    const patch = key === 'autoSwitchEnabled' && value === false
+      ? { autoSwitchEnabled: false, autoResumeEnabled: false }
+      : { [key]: value };
+    state.guardPatch = { ...state.guardPatch, ...patch };
     renderGuardSettings();
 
     // The server returns a full settings snapshot, so apply save responses in order.
     guardSaveQueue = guardSaveQueue.then(async () => {
       let data;
       try {
-        data = await apiPost('/api/settings/update', { [key]: value });
+        data = await apiPost('/api/settings/update', patch);
         if (!data?.settings) throw new Error(t('errGuardSave'));
         showNotice(t('noticeGuardSaved'), 'ok', { autoHideMs: 2000 });
       } catch (err) {
@@ -1286,7 +1297,9 @@
           state.data = { ...state.data, settings, logs, quotaAlert };
           renderLogs(state.data);
         }
-        delete state.guardPatch[key];
+        for (const field of Object.keys(patch)) {
+          if (state.guardPatch[field] === patch[field]) delete state.guardPatch[field];
+        }
         renderGuardSettings();
       }
     });

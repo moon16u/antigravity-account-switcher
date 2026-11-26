@@ -78,7 +78,7 @@ export const MCP_TOOLS = Object.freeze([
   {
     name: 'switch_account',
     description:
-      'Safely switch the active Antigravity account and restart the desktop app after a short delay (default 3s). Checks active conversations/tasks/terminals first, excluding the caller conversationId when provided. With pickBest: true, picks the healthiest backup from local quota snapshots/reset projection (never remote internal APIs) and respects guard settings, including opt-in onboarding sync and natural pause.',
+      'Requires Agent Autonomous Switch (autoSwitchEnabled) in Advanced Settings. It is off by default and returns AGENT_SWITCH_DISABLED when off. Switches the active Antigravity account and restarts the desktop app after a short delay (default 3s). Checks active conversations/tasks/terminals first, excluding the caller conversationId when provided. With pickBest: true, picks the healthiest backup from local quota snapshots/reset projection (never remote internal APIs) and respects guard settings, including opt-in onboarding sync and natural pause.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -333,8 +333,19 @@ export function createMcpHandlers(options = {}) {
     }
 
     if (name === 'switch_account') {
-      const ctx = await resolveLiveContext();
       const settings = loadGuardSettings(paths);
+      if (!settings.autoSwitchEnabled) {
+        return toolResult(
+          {
+            ok: false,
+            code: 'AGENT_SWITCH_DISABLED',
+            message:
+              'Agent Autonomous Switch is disabled in Advanced Settings. Ask the user to switch accounts manually in the sidebar or enable "Agent Autonomous Switch" first.',
+          },
+          true
+        );
+      }
+      const ctx = await resolveLiveContext();
       const cid = typeof args.conversationId === 'string' ? args.conversationId.trim() : '';
       const force = Boolean(args.force);
       let targetAccountId = typeof args.accountId === 'string' ? args.accountId.trim() : '';

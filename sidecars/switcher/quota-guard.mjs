@@ -46,18 +46,23 @@ export function normalizeGuardSettings(raw, base = DEFAULT_GUARD_SETTINGS) {
   const src = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
   const defaultFor = (key) =>
     Object.hasOwn(fallback, key) ? fallback[key] ?? DEFAULT_GUARD_SETTINGS[key] : DEFAULT_GUARD_SETTINGS[key];
-  const valueFor = (key) => Object.hasOwn(src, key) ? src[key] : defaultFor(key);
+  const valueFor = (key, fallbackValue = defaultFor(key)) => Object.hasOwn(src, key) ? src[key] : fallbackValue;
+  const pickBool = (key, fallbackValue) => Boolean(valueFor(key, fallbackValue));
+  const autoSwitchEnabled = pickBool('autoSwitchEnabled');
+  const autoResumeEnabled = autoSwitchEnabled
+    ? pickBool('autoResumeEnabled', defaultFor('autoSwitchEnabled') && defaultFor('autoResumeEnabled'))
+    : false;
 
   return {
-    alertEnabled: Boolean(valueFor('alertEnabled')),
-    autoSwitchEnabled: Boolean(valueFor('autoSwitchEnabled')),
-    autoResumeEnabled: Boolean(valueFor('autoResumeEnabled')),
-    skipOnboardingPrompt: Boolean(valueFor('skipOnboardingPrompt')),
-    dynamicThresholdEnabled: Boolean(valueFor('dynamicThresholdEnabled')),
-    naturalPauseEnabled: Boolean(valueFor('naturalPauseEnabled')),
+    alertEnabled: pickBool('alertEnabled'),
+    autoSwitchEnabled,
+    autoResumeEnabled,
+    skipOnboardingPrompt: pickBool('skipOnboardingPrompt'),
+    dynamicThresholdEnabled: pickBool('dynamicThresholdEnabled'),
+    naturalPauseEnabled: pickBool('naturalPauseEnabled'),
     thresholdPercent: clampInt(valueFor('thresholdPercent'), 1, 50, defaultFor('thresholdPercent')),
-    watchWeekly: Boolean(valueFor('watchWeekly')),
-    watch5h: Boolean(valueFor('watch5h')),
+    watchWeekly: pickBool('watchWeekly'),
+    watch5h: pickBool('watch5h'),
     switchDelaySec: clampInt(valueFor('switchDelaySec'), 1, 10, defaultFor('switchDelaySec')),
   };
 }

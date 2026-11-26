@@ -51,12 +51,13 @@
   - 面板右上角支持一键 **`中 / EN`** 实时切换界面语言。
 - **Agent MCP 工具与事件驱动低额度守护**：
   - 内置零依赖 stdio MCP 服务（`mcp_config.json` → `scripts/mcp-server.mjs`，服务版本 `0.4.0`），提供 `get_switcher_status`、`list_accounts`、`get_quota` 与 `switch_account` 工具，并附带 `/switch-account` 技能（`skills/switch-account/SKILL.md`）。`get_quota` 对活跃账号读取本地 `language_server` 实时配额，对非活跃账号读取本地快照并做重置投影；`switch_account`（`pickBest: true`）基于本地快照选择，并附「最近最少使用且无快照」的备用号回退，同时在切号前采集快照。
+  - **「Agent 自主切号」是 MCP 层的硬性权限门禁**（`autoSwitchEnabled`，**默认关闭**）。关闭时，Agent 仅具备只读权限（当前账号状态、配额与低额度提醒），`switch_account` 会在 MCP 服务层被直接拒绝并返回 `AGENT_SWITCH_DISABLED`；此时 Agent 应如实报告当前状态与配额，并引导用户在侧栏「Account Switcher」中手动切号，或在「**高级设置**」中开启「**Agent 自主切号**」。**「切号后自动续跑」** 与该门禁联动：门禁关闭时，该选项会被自动关闭并在界面中置灰禁用。开启后，Agent 可在用户明确要求时或触及低额度硬下限时执行切号（仍受活跃任务检测护栏约束），「**切号后自动续跑**」也可独立开关。
   - 配额检查由对话生命周期驱动：**`PostInvocation`** Hook（`hooks.json` → `scripts/quota-hook.mjs`）写入节流的本地触发文件（`quota-refresh-trigger.json`），Sidecar 通过 `fs.watch` 监听并合并事件，随后仅查询当前活跃账号的本地 `language_server` RPC，写入脱敏的 `quota-alert.json`。整个过程没有空闲心跳轮询，Hook 会立即返回且不执行网络或 RPC 调用（Windows 下若 `PATH` 缺少 `node`，自动回退到 Antigravity 内置的 `%APPDATA%\Antigravity\bin\agy-node.cmd`）。
   - **`PreInvocation`** Hook 以毫秒级读取本地快照、零常驻内存，并注入按会话去重的分级 `systemMessage`：**`soft`** 表示额度进入软阈值后的收尾提醒，**`hard`** 表示触及硬下限后的切号提示。去重按会话与级别分别记录，因此同一会话可从 `soft` 升级为 `hard` 再提醒一次，而同级重复提醒保持静默。
-  - 在「高级工具 → **高级设置**」中可按需切换周/5h 池监控、**动态阈值区间**（`dynamicThresholdEnabled` 默认开启：按会话随机浮动的软收尾与切号阈值）、**切号自然停顿**（`naturalPauseEnabled` 默认开启）、**Agent 自动切号**（仅在无其他并发会话或任务时生效）、**切号后自动续跑**，以及面板底部的**触发阈值**（`10%–50%`）。
+  - 在「高级工具 → **高级设置**」中可按需切换周/5h 池监控、**动态阈值区间**（`dynamicThresholdEnabled` 默认开启：按会话随机浮动的软收尾与切号阈值）、**切号自然停顿**（`naturalPauseEnabled` 默认开启）、**Agent 自主切号**（`autoSwitchEnabled`，**默认关闭**：MCP 层硬性权限门禁，关闭时 Agent 仅具只读权限且 `switch_account` 会返回 `AGENT_SWITCH_DISABLED`）、**切号后自动续跑**（与门禁联动，**Agent 自主切号** 关闭时自动关闭并在界面中置灰禁用），以及面板底部的**触发阈值**（`10%–50%`）。
   - **高级设置**面板采用精简的设置标题，信息与风险说明仅在悬停 `ⓘ` 图标时展示；布尔选项统一为右对齐的即时「**关闭 / 开启**」左右分段切换控件，与「已保存账号」卡片的操作控件保持一致。
   - **高级设置**面板还提供可选开关 **`skipOnboardingPrompt`**（**默认关闭**）。开启后，`switcher-worker` 仅在设备已有确认记录时更新 `app_storage.json`（`agy.onboarding.lastLoginUsername`），以在后续切号时跳过重复的引导弹窗。
-  - 由 Agent 发起且携带 `conversationId` 的切号会（在有限时间内）等待当前回合正常收尾后再关闭桌面端应用；开启自动续跑时会在重启后的新 Hub 与 MCP 工具就绪后发送 `agentapi send-message` 唤醒原会话。
+  - 由 Agent 发起且携带 `conversationId` 的切号会（在有限时间内）等待当前回合正常收尾后再关闭桌面端应用；当「**切号后自动续跑**」开启时（需先开启「**Agent 自主切号**」），会在重启后的新 Hub 与 MCP 工具就绪后发送 `agentapi send-message` 唤醒原会话。
 
 ## 功能边界与已知限制
 
@@ -150,7 +151,7 @@
 - `last-token.enc.json` — 切号 / 原生重新登录前自动备份的活跃凭证密文（Unix 下 `0600`）
 - `jobs/job-<uuid>.enc.json` — 单次加密切号任务（由 `switcher-worker.mjs` 读取后立即删除）
 - `switch.log` — 脱敏的切号、错误码与强制切换审计日志（不含任何明文邮箱或令牌）
-- `settings.json` — 低额度守护阈值、动态阈值、自然停顿、引导状态同步、自动切号与自动唤醒续跑配置（Unix 下 `0600`）
+- `settings.json` — 低额度守护阈值、动态阈值、自然停顿、引导状态同步、**Agent 自主切号** 与 **切号后自动续跑** 配置（Unix 下 `0600`）
 - `quota-snapshots.json` — 本地分账号配额快照缓存，用于重置投影与非活跃账号展示（Unix 下 `0600`）
 - `quota-alert.json` — 脱敏的当前账号低额度状态快照与推荐满血备用号
 - `quota-refresh-trigger.json` — 由 `PostInvocation` 写入、Sidecar 通过 `fs.watch` 监听的节流触发文件

@@ -939,6 +939,14 @@ summary:focus-visible {
   overflow-wrap: anywhere;
 }
 
+.guard-row-disabled .guard-row-label > span:first-child {
+  color: var(--sw-fg-faint);
+}
+
+.guard-row-disabled .guard-segmented {
+  opacity: 0.52;
+}
+
 .guard-segmented,
 .guard-select {
   width: 100%;

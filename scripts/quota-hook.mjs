@@ -109,11 +109,13 @@ export function resolveHookDataDir(env = process.env) {
 
 function readHookSettings(settingsPath) {
   const raw = readSafeJson(settingsPath) || {};
+  const autoSwitchEnabled = Boolean(raw.autoSwitchEnabled);
+  const autoResumeEnabled = autoSwitchEnabled && Boolean(raw.autoResumeEnabled);
   const rawThreshold = Number(raw.thresholdPercent);
   return {
     alertEnabled: raw.alertEnabled === undefined ? true : Boolean(raw.alertEnabled),
-    autoSwitchEnabled: Boolean(raw.autoSwitchEnabled),
-    autoResumeEnabled: Boolean(raw.autoResumeEnabled),
+    autoSwitchEnabled,
+    autoResumeEnabled,
     thresholdPercent: Number.isFinite(rawThreshold)
       ? Math.min(50, Math.max(1, Math.round(rawThreshold)))
       : 10,
@@ -205,8 +207,8 @@ function formatAlertMessage(snapshot, settings, conversationId, level) {
       settings.thresholdPercent,
     ]) ?? settings.thresholdPercent;
   const actionText = settings.autoSwitchEnabled
-    ? `已开启「低额度自动切号」${settings.autoResumeEnabled ? '与「重启自动唤醒续跑」' : ''}：请先安全完成当前原子写入/步骤，然后调用 MCP 工具 antigravity-account-switcher_switcher/switch_account（传入 pickBest: true${conversationId ? `, conversationId: "${conversationId}"` : ''}）切换备用号（若返回有其他活跃对话或终端在运行，切勿擅自传 force: true，请先询问用户确认）。`
-    : `当前为提醒模式：请在回复中告知用户上述低额度状态${snapshot.bestCandidate ? '及推荐备用号' : ''}，并询问是否现在调用 switch_account 切号重启${conversationId ? `（切号时传入 conversationId: "${conversationId}" 以排除当前会话）` : ''}。`;
+    ? `已开启「Agent 自主切号」${settings.autoResumeEnabled ? '与「切号后自动续跑」' : ''}：请先安全完成当前原子写入/步骤，然后调用 MCP 工具 antigravity-account-switcher_switcher/switch_account（传入 pickBest: true${conversationId ? `, conversationId: "${conversationId}"` : ''}）切换备用号（若返回有其他活跃对话或终端在运行，切勿擅自传 force: true，请先询问用户确认）。`
+    : `当前未开启「Agent 自主切号」（已禁止 Agent 通过 MCP 切号）：请在回复中告知用户上述低额度状态${snapshot.bestCandidate ? '及推荐备用号' : ''}，提醒用户自行在右侧 Account Switcher 面板手动切换账号，或按需在「高级设置」中开启「Agent 自主切号」。`;
 
   return `[Account Switcher 低额度预警] ${remaining.join('、')}${acctText}；硬性阈值 ${hardFloor}%${candidateText}${cidPart}。${actionText}`;
 }

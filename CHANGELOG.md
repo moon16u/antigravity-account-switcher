@@ -19,6 +19,7 @@ Low-Risk Architecture Hardening: the plugin is now fully local-first, makes no d
 
 ### Changed
 
+- **Agent Autonomous Switch** (`Agent 自主切号`, default OFF) now acts as a hard, fail-closed MCP permission gate: when OFF, the Agent keeps read-only access (status, quota, alerts) and `switch_account` is rejected at the MCP server layer with `AGENT_SWITCH_DISABLED`. **Auto-Resume After Switch** is coupled to this gate: it is automatically disabled and greyed out in the UI while autonomous switching is off; when ON, the Agent may switch on user request or at the low-quota hard floor (still guarded by active-work detection) and **Auto-Resume After Switch** can be toggled independently.
 - Promoted native sign-in (`+ Add Account` → back up the active account, restart into official Google sign-in, then click `Save Account`) as the primary and sole account addition flow.
 - Updated the MCP server (`0.4.0`) `get_quota` and `switch_account` (`pickBest: true`) to use local snapshots plus reset projection (with a least-recently-used unsnapshotted fallback) and to capture pre-switch snapshots before switching.
 - Updated the `PreInvocation` hook to emit level-aware alerts (`soft` wrap-up reminder vs `hard` switch prompt) with per-level conversation deduplication.

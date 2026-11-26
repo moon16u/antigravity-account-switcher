@@ -133,10 +133,10 @@
             </div>
             <div class="guard-row">
               <div class="guard-row-label">
-                <span id="guard-auto-switch-label">Agent 自动切号</span>
+                <span id="guard-auto-switch-label">Agent 自主切号</span>
                 <span class="info-tip">
                   <button type="button" class="info-tip-btn" aria-label="设置说明" aria-describedby="guard-auto-switch-tip"></button>
-                  <span id="guard-auto-switch-tip" class="info-tip-popover" role="tooltip">中风险：仅在无其他并发会话或任务时自动切号；高频无人值守切换会增加账号关联风险，建议按需开启。</span>
+                  <span id="guard-auto-switch-tip" class="info-tip-popover" role="tooltip">中风险：关闭时禁止 Agent 切号；开启后授权 Agent 在低额度或指令下自主切号（仅在无其他并发会话或任务时生效），高频切换可能增加账号关联风险。</span>
                 </span>
               </div>
               <div id="guard-auto-switch" class="guard-segmented" role="radiogroup" aria-labelledby="guard-auto-switch-label">
@@ -144,15 +144,15 @@
                 <button type="button" class="guard-seg-btn" role="radio" aria-checked="false" tabindex="-1" data-value="true" disabled>开启</button>
               </div>
             </div>
-            <div class="guard-row">
+            <div id="guard-auto-resume-row" class="guard-row guard-row-disabled">
               <div class="guard-row-label">
                 <span id="guard-auto-resume-label">切号后自动续跑</span>
                 <span class="info-tip">
                   <button type="button" class="info-tip-btn" aria-label="设置说明" aria-describedby="guard-auto-resume-tip"></button>
-                  <span id="guard-auto-resume-tip" class="info-tip-popover" role="tooltip">中风险：桌面端应用重启就绪后自动唤醒当前会话继续任务，建议配合 Agent 自动切号使用。</span>
+                  <span id="guard-auto-resume-tip" class="info-tip-popover" role="tooltip">中风险：桌面端应用重启就绪后自动唤醒当前会话继续任务；需开启「Agent 自主切号」后才可启用。</span>
                 </span>
               </div>
-              <div id="guard-auto-resume" class="guard-segmented" role="radiogroup" aria-labelledby="guard-auto-resume-label">
+              <div id="guard-auto-resume" class="guard-segmented" role="radiogroup" aria-labelledby="guard-auto-resume-label" aria-disabled="true">
                 <button type="button" class="guard-seg-btn" role="radio" aria-checked="true" tabindex="0" data-value="false" disabled>关闭</button>
                 <button type="button" class="guard-seg-btn" role="radio" aria-checked="false" tabindex="-1" data-value="true" disabled>开启</button>
               </div>
