@@ -9,6 +9,11 @@ English | [简体中文](README.zh-CN.md) | [Changelog](CHANGELOG.md)
 
 A cross-platform auxiliary-pane plugin (`SIDECAR_UI_ENTRYPOINT_AUX_PANE`) for **Google Antigravity 2.0** that manages multiple personal accounts with a **low-risk, local-first architecture**: official native Google sign-in, AES-256-GCM encrypted storage, local quota snapshots with reset-time estimation, and safe desktop restarts across Windows, WSL2, Linux, and macOS — built on **Node.js >= 18** with **zero external npm dependencies**, **zero outbound remote API calls**, and **zero idle polling**.
 
+> [!IMPORTANT]
+> **Upgrade notice (`v0.2.x / v0.3.x` → `v0.4.0`)**: `v0.4.0` switches to a local-first, low-risk architecture with no outbound Google API calls, no binary extraction, and no 60s background polling. If you installed an earlier version, please run `git pull` inside the plugin directory and restart Antigravity.
+>
+> **Heads-up**: I use this plugin myself every day and have not experienced any account issues or bans so far — if that ever changes, I will update this notice promptly. That said, switching multiple accounts on the same device still carries inherent platform policy risk, so please switch sensibly and be mindful with primary accounts. This is an independent MIT-licensed community tool; please assess the risk for your own setup (see [Risk Notice & Disclaimer](#risk-notice--disclaimer)).
+
 <p align="center">
   <img src="assets/demo.gif" alt="Antigravity Account Switcher Demo" width="560" />
 </p>
@@ -58,7 +63,12 @@ A cross-platform auxiliary-pane plugin (`SIDECAR_UI_ENTRYPOINT_AUX_PANE`) for **
 4. **Native Sign-In Only**: Adding accounts relies on Antigravity's built-in Google sign-in flow (no self-hosted browser OAuth or binary extraction).
 5. **Static Outer Tab Title**: Antigravity manifests currently accept static strings only, so the Plugins entry and side-pane tab always display **`Account Switcher`**, while all content inside the panel supports **`中 / EN`** switching.
 6. **Platform Testing**: Windows (native) and WSL2 + Windows host are verified end-to-end on real desktops; Linux and macOS pass the full CI test matrix, and real-hardware macOS feedback is welcome.
-7. **Independent Community Project**: Not affiliated with or endorsed by Google. All credentials stay encrypted locally on your machine.
+
+## Risk Notice & Disclaimer
+
+- **Author's Real-World Status**: I actively use this plugin on Windows and WSL2 in my own daily workflow. As of now, no account restrictions or bans have occurred from using it — should that ever change, I will document it here openly and promptly.
+- **Practical Guidance**: Even with zero remote requests and zero idle polling in `v0.4.0`, rotating multiple accounts on the same device and network remains within platform policy boundaries. Consider keeping your mounted account count and daily switch frequency moderate, and leave **Agent Autonomous Switch** off for important primary accounts.
+- **Disclaimer**: This is an independent open-source community project, not affiliated with or endorsed by Google, provided "AS IS" under the [MIT License](LICENSE). All credentials remain encrypted locally on your own machine. Please review and follow the relevant Google / Antigravity Terms of Service and use this tool at your own discretion; the author is not responsible for any account restrictions, quota changes, or other consequences arising from its use.
 
 ## Requirements
 
