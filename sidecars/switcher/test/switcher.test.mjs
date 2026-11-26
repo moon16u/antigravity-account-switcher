@@ -1,28 +1,21 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { generateKeyPairSync, randomBytes, sign as cryptoSign } from 'node:crypto';
 import {
   chmodSync,
-  closeSync,
   existsSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
-  openSync,
   readFileSync,
-  readSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import http from 'node:http';
-import https from 'node:https';
-import net from 'node:net';
-import { homedir, tmpdir } from 'node:os';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
-import tls from 'node:tls';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import {
   extractActiveItemsFromLs,
@@ -30,29 +23,15 @@ import {
   isInfrastructureProcess,
   parsePsOutput,
 } from '../active-work.mjs';
-import {
-  extractBinaryOAuthClients,
-  extractMachOOAuthClients,
-  extractPeOAuthClients,
-} from '../binary-oauth.mjs';
-import {
-  buildCloudCodeUserAgent,
-  DEFAULT_CLOUD_CODE_ENDPOINT,
-  ensureFreshAccessToken,
-  extractCloudCodeProfile,
-  FALLBACK_CLOUD_CODE_ENDPOINT,
-  mapCloudCodePlatform,
-  normalizeQuotaSummary,
-  postCloudCodeJson,
-  resolveAntigravityVersion,
-} from '../cloudcode.mjs';
 import { createApp } from '../main.mjs';
+import { readQuotaAlertSnapshot, writeQuotaRefreshTrigger } from '../quota-guard.mjs';
 import {
-  extractElfOAuthClients,
-  httpsJsonRequest,
-  loadNativeOAuthClients,
-  supportsNativeProxyEnv,
-} from '../oauth.mjs';
+  createQuotaService,
+  deleteQuotaSnapshot,
+  loadQuotaSnapshots,
+  projectQuotaSummary,
+  upsertQuotaSnapshot,
+} from '../quota-snapshots.mjs';
 import {
   buildRelaunchEnv,
   detectRuntime,
@@ -84,6 +63,7 @@ import {
 } from '../token-store.mjs';
 import {
   captureCurrentAccount,
+  decryptPayload,
   getOrCreateKey,
   importAccount,
   listPublicAccounts,
@@ -103,7 +83,6 @@ import {
 const execFileAsync = promisify(execFile);
 const NODE_BIN = process.execPath;
 const WORKER_PATH = fileURLToPath(new URL('../switcher-worker.mjs', import.meta.url));
-const OAUTH_MOD_URL = pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), '../oauth.mjs')).href;
 
 function makeSampleToken(email, refresh = '1//test-refresh-token-value-123456', access = 'ya29.test-access-token') {
   return JSON.stringify({
@@ -125,131 +104,74 @@ function makeFakeJwt(email) {
   return `${header}.${payload}.fakesig`;
 }
 
-const SYNTH_SECRET_PREFIX = ['GOC', 'SPX-'].join('');
-
-function createFallbackSidecarSdk() {
-  class Response {
-    constructor(body, { contentType = 'text/plain', status = 200, headers } = {}) {
-      this.body = body;
-      this.contentType = contentType;
-      this.status = status;
-      this.headers = headers;
-    }
-  }
-
+// Exercise the same authenticated request dispatch on CI and in socket-restricted sandboxes.
+function createTestSidecarSdk() {
   class SidecarApp {
-    #token;
-    #port;
-    #server;
-    #pages = new Map();
-    #apis = new Map();
-
-    constructor() {
-      const lsAddr = process.env.ANTIGRAVITY_LS_ADDRESS;
-      const csrf = process.env.ANTIGRAVITY_CSRF_TOKEN;
-      const portStr = process.env.ANTIGRAVITY_SIDECAR_WEB_PORT;
-      if (!lsAddr || !csrf || !portStr) {
-        throw new Error('Missing required environment variables');
-      }
-      this.#token = process.env.ANTIGRAVITY_SIDECAR_UI_TOKEN;
-      this.#port = parseInt(portStr, 10);
-    }
+    routes = new Map();
+    token = process.env.ANTIGRAVITY_SIDECAR_UI_TOKEN;
 
     page(path, handler) {
-      this.#pages.set(path, handler);
+      this.api(path, handler, 'GET');
     }
 
     api(path, handler, method = 'POST') {
-      if (!this.#apis.has(path)) this.#apis.set(path, new Map());
-      this.#apis.get(path).set(method.toUpperCase(), handler);
+      this.routes.set(method + ' ' + path, handler);
     }
 
-    run() {
-      const server = http.createServer(async (req, res) => {
-        const url = new URL(req.url, `http://127.0.0.1:${this.#port}`);
-        if (req.method !== 'GET' && this.#token) {
-          const provided = req.headers['x-sidecar-token'] || url.searchParams.get('token');
-          if (provided !== this.#token) {
-            res.writeHead(401, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: 'unauthorized' }));
-            return;
-          }
-        }
-        if (req.method === 'GET' && this.#pages.has(url.pathname)) {
-          const out = await this.#pages.get(url.pathname)();
-          if (out instanceof Response) {
-            res.writeHead(out.status || 200, { 'Content-Type': out.contentType, ...out.headers });
-            res.end(out.body);
-            return;
-          }
-          res.writeHead(200, { 'Content-Type': 'text/html' });
-          res.end(out);
-          return;
-        }
-        const methodMap = this.#apis.get(url.pathname);
-        if (methodMap?.has(req.method)) {
+    async dispatch(request) {
+      const { pathname } = new URL(request.url);
+      if (request.method !== 'GET' && this.token && request.headers.get('x-sidecar-token') !== this.token) {
+        return new Response(null, { status: 401 });
+      }
+      const handler = this.routes.get(request.method + ' ' + pathname);
+      if (!handler) return new Response(null, { status: 404 });
+      return handler(request.method === 'POST' ? await request.json() : {});
+    }
+
+    async run() {
+      const origin = 'http://127.0.0.1';
+      this.server = http.createServer(async (req, res) => {
+        try {
           const chunks = [];
-          req.on('data', (c) => chunks.push(c));
-          req.on('end', async () => {
-            try {
-              const raw = Buffer.concat(chunks).toString('utf8');
-              const data = raw ? JSON.parse(raw) : {};
-              const result = await methodMap.get(req.method)(data);
-              if (result instanceof Response) {
-                res.writeHead(result.status || 200, {
-                  'Content-Type': result.contentType,
-                  ...result.headers,
-                });
-                res.end(typeof result.body === 'string' ? result.body : Buffer.from(result.body));
-                return;
-              }
-              res.writeHead(200, { 'Content-Type': 'application/json' });
-              res.end(JSON.stringify(result));
-            } catch (err) {
-              res.writeHead(500, { 'Content-Type': 'application/json' });
-              res.end(JSON.stringify({ error: err.message }));
-            }
-          });
-          return;
+          for await (const chunk of req) chunks.push(chunk);
+          const result = await this.dispatch(new Request(origin + req.url, {
+            method: req.method, headers: req.headers, body: chunks.length ? Buffer.concat(chunks) : undefined,
+          }));
+          res.writeHead(result.status, Object.fromEntries(result.headers));
+          res.end(await result.text());
+        } catch {
+          res.writeHead(500);
+          res.end();
         }
-        res.writeHead(404);
-        res.end('Not found');
       });
-
-      return new Promise((resolve) => {
-        this.#server = server.listen(this.#port, '127.0.0.1', () => resolve(server));
-      });
+      try {
+        await new Promise((resolve, reject) => {
+          this.server.once('error', reject);
+          this.server.listen(0, '127.0.0.1', resolve);
+        });
+      } catch (err) {
+        if (err.code !== 'EPERM' && err.code !== 'EACCES') throw err;
+        return (path, init) => this.dispatch(new Request(origin + path, init));
+      }
+      const { address, port } = this.server.address();
+      assert.equal(address, '127.0.0.1');
+      return (path, init) => fetch(origin + ':' + port + path, init);
     }
 
-    close() {
-      return new Promise((resolve) => {
-        if (!this.#server) return resolve();
-        this.#server.closeAllConnections?.();
-        this.#server.close(() => resolve());
-      });
+    async close() {
+      if (!this.server?.listening) return;
+      this.server.closeAllConnections();
+      await new Promise((resolve) => this.server.close(resolve));
+    }
+  }
+
+  class SdkResponse extends Response {
+    constructor(body, { contentType, status, headers }) {
+      super(body, { status, headers: { ...headers, 'Content-Type': contentType } });
     }
   }
 
-  return { SidecarApp, Response };
-}
-
-let cachedTestSidecarSdk = null;
-async function resolveSidecarSdkForTest() {
-  if (cachedTestSidecarSdk) return cachedTestSidecarSdk;
-  try {
-    cachedTestSidecarSdk = await import('sidecar_sdk');
-    return cachedTestSidecarSdk;
-  } catch {
-    const appData = process.env.ANTIGRAVITY_APP_DATA_DIR || join(homedir(), '.gemini', 'antigravity');
-    const fallback = join(appData, 'lib', 'node_modules', 'sidecar_sdk', 'index.mjs');
-    try {
-      cachedTestSidecarSdk = await import(pathToFileURL(fallback).href);
-      return cachedTestSidecarSdk;
-    } catch {
-      cachedTestSidecarSdk = createFallbackSidecarSdk();
-      return cachedTestSidecarSdk;
-    }
-  }
+  return { SidecarApp, Response: SdkResponse };
 }
 
 function makeSandbox(t) {
@@ -262,9 +184,14 @@ function makeSandbox(t) {
   });
   const env = {
     ANTIGRAVITY_GEMINI_DIR: geminiDir,
+    ANTIGRAVITY_APP_DATA_DIR: join(geminiDir, 'antigravity'),
+    ANTIGRAVITY_APP_STORAGE_PATH: join(root, 'app_storage.json'),
+    ANTIGRAVITY_LS_ADDRESS: 'test.invalid',
+    ANTIGRAVITY_CSRF_TOKEN: 'test-csrf',
     ANTIGRAVITY_EXECUTABLE_DATA_DIR: dataDir,
   };
   const paths = resolvePaths(env);
+  assert.equal(paths.useKeyring, false);
   return { root, geminiDir, dataDir, env, paths };
 }
 
@@ -367,7 +294,7 @@ test('HTTP sidecar routes: security headers, auth fail-close, rate limit, CRUD &
 
   const spawnedJobs = [];
   const srv = await createApp({
-    sidecarSdk: await resolveSidecarSdkForTest(),
+    sidecarSdk: createTestSidecarSdk(),
     env,
     port: 0,
     uiToken: 'unit-test-sidecar-token',
@@ -380,27 +307,22 @@ test('HTTP sidecar routes: security headers, auth fail-close, rate limit, CRUD &
       email: 'active@example.com',
       tierName: 'Google AI Pro',
     }),
-    cloudCodeOptions: {
-      requestFn: async () => ({ status: 200, json: {} }),
-    },
+    callLsRpc: async () => null,
     detectActiveWork: async () => ({ busy: false, count: 0, items: [], truncated: false }),
     spawnWorker: (jobPath) => {
       spawnedJobs.push(jobPath);
     },
   });
 
-  const httpServer = await srv.start();
+  const request = await srv.start();
   t.after(async () => {
     await srv.close();
   });
 
-  const addr = httpServer.address();
-  assert.equal(addr.address, '127.0.0.1');
-  const baseUrl = `http://127.0.0.1:${addr.port}`;
 
   // Static pages & headers
   for (const route of ['/', '/styles.css', '/app.js']) {
-    const res = await fetch(`${baseUrl}${route}`);
+    const res = await request(route);
     assert.equal(res.status, 200);
     const csp = res.headers.get('content-security-policy') || '';
     assert.ok(csp.includes("default-src 'self'"));
@@ -411,7 +333,7 @@ test('HTTP sidecar routes: security headers, auth fail-close, rate limit, CRUD &
   }
 
   // Missing token rejected (401)
-  const unauthRes = await fetch(`${baseUrl}/api/state`, {
+  const unauthRes = await request('/api/state', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: '{}',
@@ -419,7 +341,7 @@ test('HTTP sidecar routes: security headers, auth fail-close, rate limit, CRUD &
   assert.equal(unauthRes.status, 401);
 
   const postAuth = async (path, body = {}) => {
-    const res = await fetch(`${baseUrl}${path}`, {
+    const res = await request(path, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -446,23 +368,19 @@ test('HTTP sidecar routes: security headers, auth fail-close, rate limit, CRUD &
   const stRevealed = await postAuth('/api/state', { revealEmails: true });
   assert.equal(stRevealed.json.active.email, 'active@example.com');
 
-  // Capture active & verify /api/accounts/import is removed
+  // Capture current credentials via the native-login flow.
   const capRes = await postAuth('/api/accounts/capture', { label: 'Primary' });
   assert.equal(capRes.status, 200);
   assert.equal(capRes.json.accounts.length, 1);
 
-  const removedImpRes = await fetch(`${baseUrl}/api/accounts/import`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Sidecar-Token': 'unit-test-sidecar-token',
-    },
-    body: JSON.stringify({
-      credential: makeSampleToken('standby@example.com', '1//refresh-standby-secret-token-abc'),
-      label: 'Standby',
-    }),
-  });
-  assert.equal(removedImpRes.status, 404);
+  for (const route of ['/api/accounts/import', '/api/oauth/start', '/api/accounts/sync-tiers']) {
+    const removed = await request(route, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Sidecar-Token': 'unit-test-sidecar-token' },
+      body: '{}',
+    });
+    assert.equal(removed.status, 404, route);
+  }
 
   const standby = importAccount(paths, {
     credentialText: makeSampleToken('standby@example.com', '1//refresh-standby-secret-token-abc'),
@@ -503,6 +421,41 @@ test('HTTP sidecar routes: security headers, auth fail-close, rate limit, CRUD &
   }
   const rateLimited = await postAuth('/api/accounts/rename', { id: capRes.json.accounts[0].id, label: 'P-over' });
   assert.equal(rateLimited.status, 429);
+});
+
+test('settings updates have a dedicated rate limit with a retry countdown', async (t) => {
+  const { env } = makeSandbox(t);
+  const srv = await createApp({
+    sidecarSdk: createTestSidecarSdk(),
+    env,
+    port: 0,
+    uiToken: 'test-ui',
+    writeLimit: 1,
+    settingsLimit: 2,
+    callLsRpc: async () => null,
+    watchTriggers: false,
+  });
+  const request = await srv.start();
+  t.after(() => srv.close());
+
+  const updateThreshold = (thresholdPercent) => request('/api/settings/update', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Sidecar-Token': 'test-ui' },
+    body: JSON.stringify({ thresholdPercent }),
+  });
+  for (const threshold of [20, 30]) {
+    const res = await updateThreshold(threshold);
+    assert.equal(res.status, 200);
+    assert.equal((await res.json()).settings.thresholdPercent, threshold);
+  }
+
+  const blocked = await updateThreshold(40);
+  assert.equal(blocked.status, 429);
+  const { code, retryAfterSec, error } = await blocked.json();
+  assert.equal(code, 'RATE_LIMITED');
+  assert.ok(Number.isInteger(retryAfterSec) && retryAfterSec > 0);
+  assert.equal(blocked.headers.get('Retry-After'), String(retryAfterSec));
+  assert.equal(error, `高级设置保护中，请 ${retryAfterSec} 秒后再试。`);
 });
 
 test('switcher-worker DRY_RUN end-to-end switch and new-login without touching real environment', async (t) => {
@@ -567,10 +520,7 @@ test('switcher-worker DRY_RUN end-to-end switch and new-login without touching r
     chmodSync(outsideJob, 0o600);
   }
   await assert.rejects(
-    () =>
-      execFileAsync(NODE_BIN, [WORKER_PATH, outsideJob], {
-        env: { ...process.env, ...env, SWITCHER_DRY_RUN: '1' },
-      }),
+    () => runWorker(outsideJob, { ...env, SWITCHER_DRY_RUN: '1' }),
     /PATH_OUTSIDE_BOUNDARY/
   );
 });
@@ -578,1001 +528,23 @@ test('switcher-worker DRY_RUN end-to-end switch and new-login without touching r
 test('createApp fails closed when ANTIGRAVITY_SIDECAR_UI_TOKEN is missing', async (t) => {
   const { env } = makeSandbox(t);
   const srv = await createApp({
-    sidecarSdk: await resolveSidecarSdkForTest(),
+    sidecarSdk: createTestSidecarSdk(),
     env,
     port: 0,
     uiToken: '',
     lsAddress: 'test.invalid',
     csrfToken: 'test-csrf',
   });
-  const httpServer = await srv.start();
+  const request = await srv.start();
   t.after(async () => {
     await srv.close();
   });
-  const addr = httpServer.address();
-  const res = await fetch(`http://127.0.0.1:${addr.port}/api/state`, {
+  const res = await request('/api/state', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: '{}',
   });
   assert.equal(res.status, 403);
-});
-
-test('createApp works with fallback SidecarApp/Response test double when sidecar_sdk is absent', async (t) => {
-  const { env } = makeSandbox(t);
-  const fallbackSdk = createFallbackSidecarSdk();
-  const srv = await createApp({
-    sidecarSdk: fallbackSdk,
-    env,
-    port: 0,
-    uiToken: 'fallback-sdk-token',
-    lsAddress: 'test.invalid',
-    csrfToken: 'test-csrf',
-    getUserStatus: async () => ({ lsConnected: false, email: '', tierName: '' }),
-  });
-  const httpServer = await srv.start();
-  t.after(async () => {
-    await srv.close();
-  });
-
-  const baseUrl = `http://127.0.0.1:${httpServer.address().port}`;
-  const htmlRes = await fetch(`${baseUrl}/`);
-  assert.equal(htmlRes.status, 200);
-  const jsRes = await fetch(`${baseUrl}/app.js`);
-  assert.equal(jsRes.status, 200);
-
-  const unauthRes = await fetch(`${baseUrl}/api/state`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: '{}',
-  });
-  assert.equal(unauthRes.status, 401);
-
-  const authRes = await fetch(`${baseUrl}/api/state`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Sidecar-Token': 'fallback-sdk-token',
-    },
-    body: '{}',
-  });
-  assert.equal(authRes.status, 200);
-  const payload = await authRes.json();
-  assert.equal(payload.ok, true);
-
-  const srvNoTok = await createApp({
-    sidecarSdk: fallbackSdk,
-    env,
-    port: 0,
-    uiToken: '',
-    lsAddress: 'test.invalid',
-    csrfToken: 'test-csrf',
-  });
-  const httpNoTok = await srvNoTok.start();
-  t.after(async () => {
-    await srvNoTok.close();
-  });
-  const denied = await fetch(`http://127.0.0.1:${httpNoTok.address().port}/api/state`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: '{}',
-  });
-  assert.equal(denied.status, 403);
-});
-
-function hasElfMagic(filePath) {
-  let fd = -1;
-  try {
-    fd = openSync(filePath, 'r');
-    const head = Buffer.alloc(4);
-    const n = readSync(fd, head, 0, 4, 0);
-    return n === 4 && head[0] === 0x7f && head[1] === 0x45 && head[2] === 0x4c && head[3] === 0x46;
-  } catch {
-    return false;
-  } finally {
-    if (fd >= 0) closeSync(fd);
-  }
-}
-
-test('loadNativeOAuthClients extracts paired 1071006060591 client from local language_server ELF with exact 35-char secrets', (t) => {
-  const elfCandidates = resolveLanguageServerCandidates().filter(
-    (p) => !p.toLowerCase().endsWith('.exe') && hasElfMagic(p)
-  );
-  if (elfCandidates.length === 0) {
-    t.skip('No local ELF64 language_server binary found');
-    return;
-  }
-  const clients = loadNativeOAuthClients();
-  assert.ok(clients.length >= 1);
-  assert.ok(clients[0].id.startsWith('1071006060591-'));
-  assert.ok(clients[0].id.endsWith('.apps.googleusercontent.com'));
-  assert.equal(clients[0].id.length, 73);
-  for (const client of clients) {
-    assert.ok(client.secret.startsWith('GOCSPX-'));
-    assert.equal(client.secret.length, 35);
-    assert.equal(/decoding|https|field/.test(client.secret), false);
-  }
-});
-
-test('extractPeOAuthClients and extractBinaryOAuthClients extract paired client from local Windows PE64 language_server.exe', (t) => {
-  const peCandidates = resolveLanguageServerCandidates().filter((p) =>
-    p.toLowerCase().endsWith('language_server.exe')
-  );
-  if (peCandidates.length === 0) {
-    t.skip('No local Windows PE64 language_server.exe binary found');
-    return;
-  }
-  const peBuf = readFileSync(peCandidates[0]);
-  const peClients = extractPeOAuthClients(peBuf);
-  const binClients = extractBinaryOAuthClients(peBuf);
-  assert.deepEqual(binClients, peClients);
-  assert.ok(peClients.length >= 1);
-  assert.ok(peClients[0].id.startsWith('1071006060591-'));
-  assert.ok(peClients[0].id.endsWith('.apps.googleusercontent.com'));
-  assert.equal(peClients[0].id.length, 73);
-  for (const client of peClients) {
-    assert.ok(client.secret.startsWith('GOCSPX-'));
-    assert.equal(client.secret.length, 35);
-    assert.equal(/decoding|https|field/.test(client.secret), false);
-  }
-});
-
-function buildGoX64Text({ textVa, idVa, idLen, secVa, secLen }) {
-  const textBuf = Buffer.alloc(64);
-  const baseVa = BigInt(textVa);
-  let pos = 0;
-  // mov qword ptr [rsp+0x130], idLen (12 bytes)
-  Buffer.from([0x48, 0xc7, 0x84, 0x24, 0x30, 0x01, 0x00, 0x00]).copy(textBuf, pos);
-  textBuf.writeUInt32LE(idLen, pos + 8);
-  pos += 12;
-  // lea r8, [rip + idDisp] (7 bytes)
-  const idPc = baseVa + BigInt(pos);
-  textBuf[pos] = 0x4c;
-  textBuf[pos + 1] = 0x8d;
-  textBuf[pos + 2] = 0x05;
-  textBuf.writeInt32LE(Number(BigInt(idVa) - (idPc + 7n)), pos + 3);
-  pos += 7;
-  // mov qword ptr [rsp+0x110], secLen (12 bytes)
-  Buffer.from([0x48, 0xc7, 0x84, 0x24, 0x10, 0x01, 0x00, 0x00]).copy(textBuf, pos);
-  textBuf.writeUInt32LE(secLen, pos + 8);
-  pos += 12;
-  // lea r9, [rip + secDisp] (7 bytes)
-  const secPc = baseVa + BigInt(pos);
-  textBuf[pos] = 0x4c;
-  textBuf[pos + 1] = 0x8d;
-  textBuf[pos + 2] = 0x0d;
-  textBuf.writeInt32LE(Number(BigInt(secVa) - (secPc + 7n)), pos + 3);
-  pos += 7;
-  return textBuf.subarray(0, pos);
-}
-
-function encodeArm64Adrp(rd, pcVa, targetVa) {
-  const pageDelta = Number(((BigInt(targetVa) & ~0xfffn) - (BigInt(pcVa) & ~0xfffn)) >> 12n);
-  const rawImm21 = pageDelta & 0x1fffff;
-  const immlo = rawImm21 & 0x3;
-  const immhi = (rawImm21 >>> 2) & 0x7ffff;
-  return (0x90000000 | (immlo << 29) | (immhi << 5) | (rd & 0x1f)) >>> 0;
-}
-
-function encodeArm64AddImm12(rd, rn, targetVa) {
-  const imm12 = Number(BigInt(targetVa) & 0xfffn);
-  return (0x91000000 | ((imm12 & 0xfff) << 10) | ((rn & 0x1f) << 5) | (rd & 0x1f)) >>> 0;
-}
-
-function encodeArm64MovzW(rd, imm16) {
-  return (0x52800000 | ((imm16 & 0xffff) << 5) | (rd & 0x1f)) >>> 0;
-}
-
-function encodeArm64MovkLsl16(rd, imm16 = 0) {
-  return (0xf2a00000 | ((imm16 & 0xffff) << 5) | (rd & 0x1f)) >>> 0;
-}
-
-function buildGoArm64Text({ textVa, idVa, idLen, secVa, secLen }) {
-  const baseVa = BigInt(textVa);
-  const insns = [];
-  const emit = (u32) => insns.push(u32 >>> 0);
-  // Load client_id pointer (ADRP + ADD) and length (MOVZ + MOVK)
-  emit(encodeArm64Adrp(0, baseVa + BigInt(insns.length * 4), idVa));
-  emit(encodeArm64AddImm12(0, 0, idVa));
-  emit(encodeArm64MovzW(1, idLen));
-  emit(encodeArm64MovkLsl16(1, 0));
-  // Load client_secret pointer (ADRP + ADD) and length (MOVZ + MOVK)
-  emit(encodeArm64Adrp(2, baseVa + BigInt(insns.length * 4), secVa));
-  emit(encodeArm64AddImm12(2, 2, secVa));
-  emit(encodeArm64MovzW(3, secLen));
-  emit(encodeArm64MovkLsl16(3, 0));
-
-  const out = Buffer.alloc(insns.length * 4);
-  insns.forEach((insn, idx) => out.writeUInt32LE(insn, idx * 4));
-  return out;
-}
-
-function buildSyntheticElf64({ idStr, idTrailing, secretStr, secretTrailing }) {
-  const buf = Buffer.alloc(0x600);
-  buf[0] = 0x7f;
-  buf[1] = 0x45;
-  buf[2] = 0x4c;
-  buf[3] = 0x46;
-  buf[4] = 2; // ELF64
-  buf[5] = 1; // little endian
-  buf[6] = 1;
-  buf.writeUInt16LE(0x3e, 18); // x86_64
-  const eShoff = 0x500;
-  buf.writeBigUInt64LE(BigInt(eShoff), 40);
-  buf.writeUInt16LE(64, 58); // e_shentsize
-  buf.writeUInt16LE(4, 60); // e_shnum
-  buf.writeUInt16LE(1, 62); // e_shstrndx
-
-  const shstr = '\0.shstrtab\0.rodata\0.text\0';
-  buf.write(shstr, 0x100, 'ascii');
-  const roNameOff = shstr.indexOf('.rodata');
-  const textNameOff = shstr.indexOf('.text');
-  const shstrNameOff = shstr.indexOf('.shstrtab');
-
-  const roVa = 0x10000;
-  const roChunk = `${idStr}${idTrailing}${secretStr}${secretTrailing}`;
-  buf.write(roChunk, 0x200, 'latin1');
-  const idVa = roVa;
-  const secVa = roVa + idStr.length + idTrailing.length;
-
-  const textVa = 0x20000;
-  const textBuf = buildGoX64Text({
-    textVa,
-    idVa,
-    idLen: idStr.length,
-    secVa,
-    secLen: secretStr.length,
-  });
-  textBuf.copy(buf, 0x400);
-
-  const writeSection = (idx, nameOff, addr, off, size) => {
-    const sh = eShoff + idx * 64;
-    buf.writeUInt32LE(nameOff, sh);
-    buf.writeBigUInt64LE(BigInt(addr), sh + 16);
-    buf.writeBigUInt64LE(BigInt(off), sh + 24);
-    buf.writeBigUInt64LE(BigInt(size), sh + 32);
-  };
-  writeSection(1, shstrNameOff, 0, 0x100, shstr.length);
-  writeSection(2, roNameOff, roVa, 0x200, roChunk.length);
-  writeSection(3, textNameOff, textVa, 0x400, textBuf.length);
-  return buf;
-}
-
-function buildSyntheticPe64({ idStr, idTrailing, secretStr, secretTrailing, machine = 0x8664 }) {
-  const buf = Buffer.alloc(0x700);
-  buf[0] = 0x4d; // M
-  buf[1] = 0x5a; // Z
-  const peOff = 0x80;
-  buf.writeUInt32LE(peOff, 0x3c);
-  buf.write('PE\0\0', peOff, 'ascii');
-  buf.writeUInt16LE(machine, peOff + 4);
-  buf.writeUInt16LE(2, peOff + 6); // NumberOfSections
-  const optSize = 0xf0;
-  buf.writeUInt16LE(optSize, peOff + 20);
-
-  const optOff = peOff + 24;
-  buf.writeUInt16LE(0x20b, optOff); // PE32+
-  const imageBase = 0x140000000n;
-  buf.writeBigUInt64LE(imageBase, optOff + 24);
-
-  const rdataRva = 0x1000;
-  const rdataRaw = 0x300;
-  const roChunk = `${idStr}${idTrailing}${secretStr}${secretTrailing}`;
-  buf.write(roChunk, rdataRaw, 'latin1');
-
-  const textRva = 0x2000;
-  const textRaw = 0x500;
-  const textVa = imageBase + BigInt(textRva);
-  const idVa = imageBase + BigInt(rdataRva);
-  const secVa = idVa + BigInt(idStr.length + idTrailing.length);
-  const textBuf =
-    machine === 0xaa64
-      ? buildGoArm64Text({ textVa, idVa, idLen: idStr.length, secVa, secLen: secretStr.length })
-      : buildGoX64Text({ textVa, idVa, idLen: idStr.length, secVa, secLen: secretStr.length });
-  textBuf.copy(buf, textRaw);
-
-  const secOff = optOff + optSize;
-  const writePeSec = (idx, name, vaddr, rawSize, rawPtr) => {
-    const o = secOff + idx * 40;
-    buf.write(name, o, 'ascii');
-    buf.writeUInt32LE(vaddr, o + 12);
-    buf.writeUInt32LE(rawSize, o + 16);
-    buf.writeUInt32LE(rawPtr, o + 20);
-  };
-  writePeSec(0, '.rdata', rdataRva, roChunk.length, rdataRaw);
-  writePeSec(1, '.text', textRva, textBuf.length, textRaw);
-  return buf;
-}
-
-function buildSyntheticMachO64({
-  arch = 'x64',
-  idStr = '',
-  idTrailing = '',
-  secretStr = '',
-  secretTrailing = '',
-  roSectName = '__rodata',
-  includeClient = true,
-}) {
-  const buf = Buffer.alloc(0x600);
-  const isArm64 = arch === 'arm64';
-  const cputype = isArm64 ? 0x0100000c : 0x01000007;
-  buf.writeUInt32LE(0xfeedfacf, 0); // MH_MAGIC_64
-  buf.writeInt32LE(cputype, 4);
-  buf.writeUInt32LE(1, 16); // ncmds
-  const cmdSize = 72 + 2 * 80;
-  buf.writeUInt32LE(cmdSize, 20); // sizeofcmds
-
-  const cmdOff = 32;
-  buf.writeUInt32LE(0x19, cmdOff); // LC_SEGMENT_64
-  buf.writeUInt32LE(cmdSize, cmdOff + 4);
-  buf.write('__TEXT', cmdOff + 8, 'ascii');
-  buf.writeUInt32LE(2, cmdOff + 64); // nsects
-
-  const roOff = 0x200;
-  const roVa = 0x10000n;
-  const roChunk = includeClient ? `${idStr}${idTrailing}${secretStr}${secretTrailing}` : 'decoy_slice_data';
-  buf.write(roChunk, roOff, 'latin1');
-
-  const textOff = 0x400;
-  const textVa = 0x20000n;
-  let textBuf;
-  if (!includeClient) {
-    textBuf = Buffer.from([0x90, 0x90, 0x90, 0x90]);
-  } else if (isArm64) {
-    textBuf = buildGoArm64Text({
-      textVa,
-      idVa: roVa,
-      idLen: idStr.length,
-      secVa: roVa + BigInt(idStr.length + idTrailing.length),
-      secLen: secretStr.length,
-    });
-  } else {
-    textBuf = buildGoX64Text({
-      textVa,
-      idVa: roVa,
-      idLen: idStr.length,
-      secVa: roVa + BigInt(idStr.length + idTrailing.length),
-      secLen: secretStr.length,
-    });
-  }
-  textBuf.copy(buf, textOff);
-
-  const writeMachOSect = (idx, sectname, segname, addr, size, offset) => {
-    const o = cmdOff + 72 + idx * 80;
-    buf.write(sectname, o, 'ascii');
-    buf.write(segname, o + 16, 'ascii');
-    buf.writeBigUInt64LE(BigInt(addr), o + 32);
-    buf.writeBigUInt64LE(BigInt(size), o + 40);
-    buf.writeUInt32LE(offset, o + 48);
-  };
-  writeMachOSect(0, roSectName, '__TEXT', roVa, roChunk.length, roOff);
-  writeMachOSect(1, '__text', '__TEXT', textVa, textBuf.length, textOff);
-  return buf;
-}
-
-function buildUniversalFatMachO(slices, { fat64 = false } = {}) {
-  const archSize = fat64 ? 32 : 20;
-  const headerSize = 8 + slices.length * archSize;
-  const alignedHeader = Math.ceil(headerSize / 16) * 16;
-  const totalSize = alignedHeader + slices.reduce((sum, s) => sum + s.buf.length, 0);
-  const out = Buffer.alloc(totalSize);
-
-  out.writeUInt32BE(fat64 ? 0xcafebabf : 0xcafebabe, 0);
-  out.writeUInt32BE(slices.length, 4);
-
-  let cursor = alignedHeader;
-  slices.forEach((slice, idx) => {
-    const o = 8 + idx * archSize;
-    out.writeInt32BE(slice.cputype, o);
-    out.writeInt32BE(slice.cpusubtype || 0, o + 4);
-    if (fat64) {
-      out.writeBigUInt64BE(BigInt(cursor), o + 8);
-      out.writeBigUInt64BE(BigInt(slice.buf.length), o + 16);
-    } else {
-      out.writeUInt32BE(cursor, o + 8);
-      out.writeUInt32BE(slice.buf.length, o + 12);
-    }
-    slice.buf.copy(out, cursor);
-    cursor += slice.buf.length;
-  });
-  return out;
-}
-
-test('extractElfOAuthClients trims non-null-terminated .rodata strings using Go x64 string-length immediates', () => {
-  const idStr = '1071006060591-synthid00000001.apps.googleusercontent.com';
-  const secretStr = `${SYNTH_SECRET_PREFIX}synth0123456789abcdefghij123`;
-  assert.equal(secretStr.length, 35);
-  const elf = buildSyntheticElf64({
-    idStr,
-    idTrailing: 'TRAILING',
-    secretStr,
-    secretTrailing: 'decodingNEXTSTRING',
-  });
-  const clients = extractElfOAuthClients(elf);
-  assert.equal(clients.length, 1);
-  assert.equal(clients[0].id, idStr);
-  assert.equal(clients[0].secret, secretStr);
-  assert.equal(clients[0].secret.length, 35);
-  assert.equal(clients[0].secret.includes('decoding'), false);
-});
-
-test('extractPeOAuthClients and extractBinaryOAuthClients extract synthetic PE64 x64 and ARM64 clients', () => {
-  const idStr = '1071006060591-synthpe64x6400000000000000000001.apps.googleusercontent.com';
-  const secretStr = `${SYNTH_SECRET_PREFIX}synthpe64x640123456789abcdef`;
-  assert.equal(idStr.length, 73);
-  assert.equal(secretStr.length, 35);
-
-  for (const machine of [0x8664, 0xaa64]) {
-    const pe = buildSyntheticPe64({
-      idStr,
-      idTrailing: 'TRAILING',
-      secretStr,
-      secretTrailing: 'decodingNEXTSTRING',
-      machine,
-    });
-    const peClients = extractPeOAuthClients(pe);
-    const binClients = extractBinaryOAuthClients(pe);
-    assert.deepEqual(peClients, [{ id: idStr, secret: secretStr }]);
-    assert.deepEqual(binClients, peClients);
-  }
-
-  assert.deepEqual(extractPeOAuthClients(Buffer.from('MZshort')), []);
-});
-
-test('extractMachOOAuthClients and extractBinaryOAuthClients support Mach-O x64, ARM64 (ADRP+ADD+MOVZ/MOVK), and Universal Fat Mach-O', () => {
-  const idStr = '1071006060591-synthmacho0000000000000000000001.apps.googleusercontent.com';
-  const secretStr = `${SYNTH_SECRET_PREFIX}synthmacho0123456789abcdefgh`;
-  assert.equal(idStr.length, 73);
-  assert.equal(secretStr.length, 35);
-
-  const machX64 = buildSyntheticMachO64({
-    arch: 'x64',
-    idStr,
-    idTrailing: 'TRAILING',
-    secretStr,
-    secretTrailing: 'decodingNEXTSTRING',
-  });
-  assert.deepEqual(extractMachOOAuthClients(machX64), [{ id: idStr, secret: secretStr }]);
-  assert.deepEqual(extractBinaryOAuthClients(machX64), [{ id: idStr, secret: secretStr }]);
-
-  const machArm64 = buildSyntheticMachO64({
-    arch: 'arm64',
-    idStr,
-    idTrailing: 'TRAILING',
-    secretStr,
-    secretTrailing: 'httpsNEXTSTRING',
-    roSectName: '__cstring',
-  });
-  assert.deepEqual(extractMachOOAuthClients(machArm64), [{ id: idStr, secret: secretStr }]);
-  assert.deepEqual(extractBinaryOAuthClients(machArm64), [{ id: idStr, secret: secretStr }]);
-
-  const decoyX64 = buildSyntheticMachO64({ arch: 'x64', includeClient: false });
-  const fat32 = buildUniversalFatMachO([
-    { cputype: 0x01000007, buf: decoyX64 },
-    { cputype: 0x0100000c, buf: machArm64 },
-  ]);
-  assert.deepEqual(extractMachOOAuthClients(fat32), [{ id: idStr, secret: secretStr }]);
-  assert.deepEqual(extractBinaryOAuthClients(fat32), [{ id: idStr, secret: secretStr }]);
-
-  const fat64 = buildUniversalFatMachO(
-    [
-      { cputype: 0x01000007, buf: decoyX64 },
-      { cputype: 0x01000007, buf: machX64 },
-    ],
-    { fat64: true }
-  );
-  assert.deepEqual(extractMachOOAuthClients(fat64), [{ id: idStr, secret: secretStr }]);
-  assert.deepEqual(extractBinaryOAuthClients(fat64), [{ id: idStr, secret: secretStr }]);
-});
-
-function generateTestTlsCert(commonName = 'oauth2.googleapis.com') {
-  const { publicKey, privateKey } = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
-  const spki = publicKey.export({ type: 'spki', format: 'der' });
-  const derLen = (n) => {
-    if (n < 128) return Buffer.from([n]);
-    const bytes = [];
-    let x = n;
-    while (x > 0) {
-      bytes.unshift(x & 0xff);
-      x >>= 8;
-    }
-    return Buffer.from([0x80 | bytes.length, ...bytes]);
-  };
-  const tlv = (tag, ...parts) => {
-    const body = Buffer.concat(parts);
-    return Buffer.concat([Buffer.from([tag]), derLen(body.length), body]);
-  };
-  const oid = (hex) => tlv(0x06, Buffer.from(hex, 'hex'));
-  const utf8 = (s) => tlv(0x0c, Buffer.from(s, 'utf8'));
-  const utc = (d) => {
-    const p = (n) => String(n).padStart(2, '0');
-    const s =
-      String(d.getUTCFullYear()).slice(-2) +
-      p(d.getUTCMonth() + 1) +
-      p(d.getUTCDate()) +
-      p(d.getUTCHours()) +
-      p(d.getUTCMinutes()) +
-      p(d.getUTCSeconds()) +
-      'Z';
-    return tlv(0x17, Buffer.from(s, 'ascii'));
-  };
-  const seq = (...p) => tlv(0x30, ...p);
-  const set = (...p) => tlv(0x31, ...p);
-  const int = (b) => {
-    let buf = Buffer.isBuffer(b) ? b : Buffer.from([b]);
-    let start = 0;
-    while (start < buf.length - 1 && buf[start] === 0) start += 1;
-    if (start > 0) buf = buf.subarray(start);
-    if (buf[0] & 0x80) buf = Buffer.concat([Buffer.from([0]), buf]);
-    return tlv(0x02, buf);
-  };
-  const bitStr = (b) => tlv(0x03, Buffer.from([0]), b);
-  const ctx = (n, ...p) => tlv(0xa0 | n, ...p);
-
-  const algId = seq(oid('2a8648ce3d040302')); // ecdsa-with-SHA256
-  const name = seq(set(seq(oid('550403'), utf8(commonName))));
-  const now = Date.now();
-  const validity = seq(utc(new Date(now - 3600_000)), utc(new Date(now + 86400_000)));
-  const sanExt = seq(oid('551d11'), tlv(0x04, seq(tlv(0x82, Buffer.from(commonName, 'ascii')))));
-  const bcExt = seq(oid('551d13'), tlv(0x01, Buffer.from([0xff])), tlv(0x04, seq(tlv(0x01, Buffer.from([0xff])))));
-  const exts = ctx(3, seq(bcExt, sanExt));
-  const serial = randomBytes(8);
-  serial[0] = (serial[0] & 0x7f) || 1;
-  const tbs = seq(ctx(0, int(2)), int(serial), algId, name, validity, name, spki, exts);
-  const sig = cryptoSign('sha256', tbs, privateKey);
-  const certDer = seq(tbs, algId, bitStr(sig));
-  const certPem =
-    '-----BEGIN CERTIFICATE-----\n' +
-    certDer.toString('base64').match(/.{1,64}/g).join('\n') +
-    '\n-----END CERTIFICATE-----\n';
-  const keyPem = privateKey.export({ type: 'pkcs8', format: 'pem' });
-  return { certPem, keyPem };
-}
-
-test('httpsJsonRequest routes through HTTP CONNECT proxyEnv without hanging and enforces host allow-list', async (t) => {
-  assert.equal(supportsNativeProxyEnv('18.20.0'), false);
-  assert.equal(supportsNativeProxyEnv('20.19.0'), false);
-  assert.equal(supportsNativeProxyEnv('22.21.0'), true);
-  assert.equal(supportsNativeProxyEnv('24.4.0'), false);
-  assert.equal(supportsNativeProxyEnv('24.5.0'), true);
-
-  const connectTargets = [];
-  const proxyServer = http.createServer((_req, res) => {
-    res.writeHead(405);
-    res.end();
-  });
-  proxyServer.on('connect', (req, socket) => {
-    connectTargets.push(req.url);
-    socket.write('HTTP/1.1 502 Bad Gateway\r\n\r\n');
-    socket.destroy();
-  });
-  await new Promise((resolve) => proxyServer.listen(0, '127.0.0.1', resolve));
-  t.after(() => proxyServer.close());
-
-  const { port } = proxyServer.address();
-  const startedAt = Date.now();
-  await assert.rejects(
-    () =>
-      httpsJsonRequest(
-        'https://oauth2.googleapis.com/token',
-        { method: 'POST', body: 'a=1', timeoutMs: 3000 },
-        { HTTPS_PROXY: `http://127.0.0.1:${port}`, NO_PROXY: '' }
-      ),
-    (err) => err?.code === 'OAUTH_PROXY_CONNECT_FAILED'
-  );
-  assert.ok(Date.now() - startedAt < 2500);
-  assert.deepEqual(connectTargets, ['oauth2.googleapis.com:443']);
-
-  await assert.rejects(
-    () => httpsJsonRequest('https://evil.example.com/token', {}, {}),
-    /DISALLOWED_OAUTH_HOST/
-  );
-});
-
-test('ProxyConnectAgent (forceLegacyProxy) handles CONNECT headers, non-200 rejection, strict TLS verification, and --use-env-proxy bypass', async (t) => {
-  const { root } = makeSandbox(t);
-  const { certPem, keyPem } = generateTestTlsCert('oauth2.googleapis.com');
-  const caPath = join(root, 'mock-ca.pem');
-  writeFileSync(caPath, certPem, 'utf8');
-
-  // 1. Non-200 CONNECT rejection + Proxy-Authorization header encoding
-  const rejectedReqs = [];
-  const rejectProxy = http.createServer((_req, res) => {
-    res.writeHead(405);
-    res.end();
-  });
-  rejectProxy.on('connect', (req, socket) => {
-    rejectedReqs.push({
-      url: req.url,
-      host: req.headers.host,
-      proxyAuth: req.headers['proxy-authorization'] || '',
-    });
-    socket.write('HTTP/1.1 407 Proxy Authentication Required\r\n\r\n');
-    socket.destroy();
-  });
-  await new Promise((resolve) => rejectProxy.listen(0, '127.0.0.1', resolve));
-  t.after(() => rejectProxy.close());
-
-  const rejectPort = rejectProxy.address().port;
-  await assert.rejects(
-    () =>
-      httpsJsonRequest(
-        'https://oauth2.googleapis.com/token',
-        { method: 'POST', body: 'a=1', timeoutMs: 3000, forceLegacyProxy: true },
-        { HTTPS_PROXY: `http://alice%40corp:s3cr%3At@127.0.0.1:${rejectPort}`, NO_PROXY: '' }
-      ),
-    (err) => err?.code === 'OAUTH_PROXY_CONNECT_FAILED'
-  );
-  assert.equal(rejectedReqs.length, 1);
-  assert.equal(rejectedReqs[0].url, 'oauth2.googleapis.com:443');
-  assert.equal(rejectedReqs[0].host, 'oauth2.googleapis.com:443');
-  assert.equal(
-    rejectedReqs[0].proxyAuth,
-    `Basic ${Buffer.from('alice@corp:s3cr:t', 'utf8').toString('base64')}`
-  );
-
-  // 2. 200 CONNECT -> mock HTTPS target: in-process rejects untrusted cert (SNI verified),
-  //    and child processes with NODE_EXTRA_CA_CERTS succeed under both normal and --use-env-proxy
-  const seenSni = [];
-  const secureCtx = tls.createSecureContext({ key: keyPem, cert: certPem });
-  const httpsTarget = https.createServer(
-    {
-      key: keyPem,
-      cert: certPem,
-      SNICallback(servername, cb) {
-        seenSni.push(servername);
-        cb(null, secureCtx);
-      },
-    },
-    (req, res) => {
-      const chunks = [];
-      req.on('data', (c) => chunks.push(c));
-      req.on('end', () => {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(
-          JSON.stringify({
-            access_token: 'mock-access-token',
-            method: req.method,
-            path: req.url,
-            body: Buffer.concat(chunks).toString('utf8'),
-          })
-        );
-      });
-    }
-  );
-  await new Promise((resolve) => httpsTarget.listen(0, '127.0.0.1', resolve));
-  t.after(() => httpsTarget.close());
-  const targetPort = httpsTarget.address().port;
-
-  const tunnelReqs = [];
-  const tunnelProxy = http.createServer((_req, res) => {
-    res.writeHead(405);
-    res.end();
-  });
-  tunnelProxy.on('connect', (req, clientSock, head) => {
-    tunnelReqs.push({
-      url: req.url,
-      host: req.headers.host,
-      proxyAuth: req.headers['proxy-authorization'] || '',
-    });
-    const upstream = net.connect(targetPort, '127.0.0.1', () => {
-      clientSock.write('HTTP/1.1 200 Connection Established\r\n\r\n');
-      if (head?.length) upstream.write(head);
-      upstream.pipe(clientSock);
-      clientSock.pipe(upstream);
-    });
-    upstream.on('error', () => clientSock.destroy());
-    clientSock.on('error', () => upstream.destroy());
-  });
-  await new Promise((resolve) => tunnelProxy.listen(0, '127.0.0.1', resolve));
-  t.after(() => tunnelProxy.close());
-  const tunnelPort = tunnelProxy.address().port;
-
-  // In-process without NODE_EXTRA_CA_CERTS must reject self-signed cert (rejectUnauthorized: true)
-  await assert.rejects(
-    () =>
-      httpsJsonRequest(
-        'https://oauth2.googleapis.com/token',
-        { method: 'POST', body: 'code=untrusted', timeoutMs: 3000, forceLegacyProxy: true },
-        { HTTPS_PROXY: `http://127.0.0.1:${tunnelPort}`, NO_PROXY: '' }
-      ),
-    (err) =>
-      ['DEPTH_ZERO_SELF_SIGNED_CERT', 'SELF_SIGNED_CERT_IN_CHAIN', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE'].includes(
-        err?.code
-      )
-  );
-  assert.ok(seenSni.includes('oauth2.googleapis.com'));
-
-  // Trap proxy verifies CONNECT never loops through global env proxy agent under --use-env-proxy
-  let trapHits = 0;
-  const trapProxy = http.createServer((_req, res) => {
-    trapHits += 1;
-    res.writeHead(500);
-    res.end();
-  });
-  trapProxy.on('connect', (_req, sock) => {
-    trapHits += 1;
-    sock.destroy();
-  });
-  await new Promise((resolve) => trapProxy.listen(0, '127.0.0.1', resolve));
-  t.after(() => trapProxy.close());
-  const trapPort = trapProxy.address().port;
-
-  const childScript = `
-    import { httpsJsonRequest } from ${JSON.stringify(OAUTH_MOD_URL)};
-    const res = await httpsJsonRequest(
-      'https://oauth2.googleapis.com/token',
-      { method: 'POST', body: 'code=ok', timeoutMs: 5000, forceLegacyProxy: true },
-      { HTTPS_PROXY: 'http://alice:pw123@127.0.0.1:${tunnelPort}', NO_PROXY: '' }
-    );
-    console.log(JSON.stringify(res));
-  `;
-
-  const extraArgCases = supportsNativeProxyEnv() ? [[], ['--use-env-proxy']] : [[]];
-  for (const extraArgs of extraArgCases) {
-    const childRes = await execFileAsync(
-      NODE_BIN,
-      [...extraArgs, '--input-type=module', '-e', childScript],
-      {
-        env: {
-          ...process.env,
-          NODE_EXTRA_CA_CERTS: caPath,
-          HTTP_PROXY: `http://127.0.0.1:${trapPort}`,
-          HTTPS_PROXY: `http://127.0.0.1:${trapPort}`,
-          http_proxy: `http://127.0.0.1:${trapPort}`,
-          https_proxy: `http://127.0.0.1:${trapPort}`,
-          NO_PROXY: '',
-          no_proxy: '',
-        },
-      }
-    );
-    const parsed = JSON.parse(childRes.stdout.trim());
-    assert.equal(parsed.status, 200);
-    assert.deepEqual(parsed.json, {
-      access_token: 'mock-access-token',
-      method: 'POST',
-      path: '/token',
-      body: 'code=ok',
-    });
-  }
-  assert.equal(trapHits, 0);
-  const expectedAuth = `Basic ${Buffer.from('alice:pw123', 'utf8').toString('base64')}`;
-  assert.equal(tunnelReqs.filter((r) => r.proxyAuth === expectedAuth).length, extraArgCases.length);
-});
-
-test('OAuth loopback flow adds second account without modifying active token, validates state, and supports cancel', async (t) => {
-  const { env, paths } = makeSandbox(t);
-  const activeTokenRaw = makeSampleToken('first@example.com', '1//refresh-first-account-111');
-  writeFileSync(paths.tokenPath, activeTokenRaw, { encoding: 'utf8', mode: 0o600 });
-
-  const capturedAuthUrls = [];
-  const tokenExchangeCalls = [];
-  const userInfoCalls = [];
-  const fakeClientId = '1071006060591-testclientid0001.apps.googleusercontent.com';
-  const fakeClientSecret = `${SYNTH_SECRET_PREFIX}fakeTestSecret000000000000000000`;
-
-  const srv = await createApp({
-    sidecarSdk: await resolveSidecarSdkForTest(),
-    env,
-    port: 0,
-    uiToken: 'oauth-unit-test-token',
-    lsAddress: 'test.invalid',
-    csrfToken: 'test-csrf',
-    getUserStatus: async () => ({
-      lsConnected: true,
-      email: 'first@example.com',
-      tierName: 'Google AI Pro',
-    }),
-    oauthOptions: {
-      loadClients: () => [{ id: fakeClientId, secret: fakeClientSecret }],
-      openBrowser: (authUrl) => {
-        capturedAuthUrls.push(authUrl);
-        return { opened: true };
-      },
-      requestFn: async (urlStr, opts) => {
-        if (urlStr === 'https://oauth2.googleapis.com/token') {
-          const params = new URLSearchParams(opts.body);
-          tokenExchangeCalls.push(Object.fromEntries(params.entries()));
-          return {
-            status: 200,
-            json: {
-              access_token: 'ya29.second-account-access-token',
-              refresh_token: '1//second-account-refresh-token-222',
-              expires_in: 3600,
-              token_type: 'Bearer',
-            },
-          };
-        }
-        if (urlStr === 'https://www.googleapis.com/oauth2/v2/userinfo') {
-          userInfoCalls.push(opts.headers?.Authorization || '');
-          return {
-            status: 200,
-            json: { email: 'SecondUser@Example.com', verified_email: true },
-          };
-        }
-        throw new Error(`Unexpected URL: ${urlStr}`);
-      },
-    },
-  });
-
-  const httpServer = await srv.start();
-  t.after(async () => {
-    await srv.close();
-  });
-
-  const addr = httpServer.address();
-  const baseUrl = `http://127.0.0.1:${addr.port}`;
-  const postAuth = async (path, body = {}) => {
-    const res = await fetch(`${baseUrl}${path}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Sidecar-Token': 'oauth-unit-test-token',
-      },
-      body: JSON.stringify(body),
-    });
-    const text = await res.text();
-    assert.equal(text.includes(fakeClientSecret), false);
-    assert.equal(text.includes('codeVerifier'), false);
-    assert.equal(text.includes('refresh-token'), false);
-    assert.equal(text.includes('access-token'), false);
-    return { status: res.status, json: JSON.parse(text) };
-  };
-
-  // Capture first account into vault
-  await postAuth('/api/accounts/capture', { label: 'Main' });
-
-  // Start OAuth flow for second account
-  const startRes = await postAuth('/api/oauth/start', { label: 'Second' });
-  assert.equal(startRes.status, 200);
-  assert.equal(startRes.json.oauth.status, 'pending');
-  assert.equal(startRes.json.oauth.browserOpened, true);
-  assert.equal(capturedAuthUrls.length, 1);
-
-  const authUrl = new URL(startRes.json.oauth.authUrl);
-  assert.equal(authUrl.origin, 'https://accounts.google.com');
-  assert.equal(authUrl.searchParams.get('client_id'), fakeClientId);
-  assert.equal(authUrl.searchParams.get('prompt'), 'select_account consent');
-  assert.equal(authUrl.searchParams.get('code_challenge_method'), 'S256');
-
-  const redirectUri = authUrl.searchParams.get('redirect_uri');
-  const stateParam = authUrl.searchParams.get('state');
-  const challenge = authUrl.searchParams.get('code_challenge');
-  assert.ok(redirectUri && redirectUri.startsWith('http://localhost:'));
-  assert.ok(stateParam && stateParam.length === 64);
-  assert.ok(challenge && challenge.length >= 40);
-
-  // Check status does not expose raw state, codeVerifier, or secrets
-  const pendingStatus = await postAuth('/api/oauth/status');
-  assert.equal(pendingStatus.status, 200);
-  assert.equal(pendingStatus.json.oauth.status, 'pending');
-  assert.equal('state' in pendingStatus.json.oauth, false);
-  assert.equal('codeVerifier' in pendingStatus.json.oauth, false);
-  assert.equal('clientSecret' in pendingStatus.json.oauth, false);
-  assert.equal(JSON.stringify(pendingStatus.json).includes(fakeClientSecret), false);
-
-  // Bad state rejected with 400 and does not close valid callback listener
-  const cbUrl = new URL(redirectUri);
-  const badCb = await fetch(`http://127.0.0.1:${cbUrl.port}/auth/callback?state=wrong-state&code=fake`);
-  assert.equal(badCb.status, 400);
-
-  // Valid callback succeeds with strict static security headers
-  const goodCb = await fetch(
-    `http://127.0.0.1:${cbUrl.port}/auth/callback?state=${encodeURIComponent(stateParam)}&code=mock-auth-code-999`
-  );
-  assert.equal(goodCb.status, 200);
-  assert.equal(goodCb.headers.get('content-security-policy'), "default-src 'none'; base-uri 'none'; form-action 'none'");
-  assert.equal(goodCb.headers.get('x-frame-options'), 'DENY');
-  assert.equal(goodCb.headers.get('x-content-type-options'), 'nosniff');
-  assert.equal(goodCb.headers.get('cache-control'), 'no-store');
-
-  // Verify token exchange & userinfo calls
-  assert.equal(tokenExchangeCalls.length, 1);
-  assert.equal(tokenExchangeCalls[0].grant_type, 'authorization_code');
-  assert.equal(tokenExchangeCalls[0].code, 'mock-auth-code-999');
-  assert.ok(tokenExchangeCalls[0].code_verifier && tokenExchangeCalls[0].code_verifier.length >= 40);
-  assert.equal(userInfoCalls[0], 'Bearer ya29.second-account-access-token');
-
-  // Verify callback listener is closed after single use
-  await new Promise((r) => setTimeout(r, 250));
-  await assert.rejects(() => fetch(`http://127.0.0.1:${cbUrl.port}/auth/callback?state=${stateParam}&code=replay`));
-
-  // Verify /api/oauth/status returns succeeded + updated 2-account vault, while active token file untouched
-  const doneStatus = await postAuth('/api/oauth/status');
-  assert.equal(doneStatus.status, 200);
-  assert.equal(doneStatus.json.oauth.status, 'succeeded');
-  assert.equal(doneStatus.json.oauth.maskedEmail, 'se***@example.com');
-  assert.equal(doneStatus.json.accounts.length, 2);
-  const firstAcc = doneStatus.json.accounts.find((a) => a.label === 'Main');
-  const secondAcc = doneStatus.json.accounts.find((a) => a.label === 'Second');
-  assert.equal(firstAcc.isActive, true);
-  assert.equal(secondAcc.isActive, false);
-  assert.equal(readFileSync(paths.tokenPath, 'utf8'), activeTokenRaw);
-
-  // Start another OAuth flow and test cancel closes listener
-  const start2 = await postAuth('/api/oauth/start', { label: 'Third' });
-  const cbUrl2 = new URL(new URL(start2.json.oauth.authUrl).searchParams.get('redirect_uri'));
-  const cancelRes = await postAuth('/api/oauth/cancel');
-  assert.equal(cancelRes.status, 200);
-  assert.equal(cancelRes.json.oauth.status, 'idle');
-  await assert.rejects(() => fetch(`http://127.0.0.1:${cbUrl2.port}/auth/callback`));
-});
-
-test('OAuth token exchange 401 invalid_client renders distinct HTML, maps message, and writes safe switch.log', async (t) => {
-  const { env, paths } = makeSandbox(t);
-  const fakeClientId = '1071006060591-testclientid0002.apps.googleusercontent.com';
-  const fakeClientSecret = `${SYNTH_SECRET_PREFIX}fakeTestSecret111111111111111111`;
-
-  const srv = await createApp({
-    sidecarSdk: await resolveSidecarSdkForTest(),
-    env,
-    port: 0,
-    uiToken: 'oauth-fail-test-token',
-    lsAddress: 'test.invalid',
-    csrfToken: 'test-csrf',
-    getUserStatus: async () => ({ lsConnected: false, email: '', tierName: '' }),
-    oauthOptions: {
-      loadClients: () => [{ id: fakeClientId, secret: fakeClientSecret }],
-      openBrowser: () => ({ opened: false }),
-      requestFn: async () => ({
-        status: 401,
-        json: {
-          error: 'invalid_client',
-          error_description: 'secret_details_should_not_leak',
-        },
-      }),
-    },
-  });
-
-  const httpServer = await srv.start();
-  t.after(async () => {
-    await srv.close();
-  });
-
-  const baseUrl = `http://127.0.0.1:${httpServer.address().port}`;
-  const postAuth = async (path, body = {}) => {
-    const res = await fetch(`${baseUrl}${path}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Sidecar-Token': 'oauth-fail-test-token',
-      },
-      body: JSON.stringify(body),
-    });
-    const text = await res.text();
-    assert.equal(text.includes(fakeClientSecret), false);
-    assert.equal(text.includes('mock-code-xyz'), false);
-    assert.equal(text.includes('secret_details_should_not_leak'), false);
-    return { status: res.status, json: JSON.parse(text) };
-  };
-
-  const startRes = await postAuth('/api/oauth/start', { label: 'FailCase' });
-  const authUrl = new URL(startRes.json.oauth.authUrl);
-  const redirectUri = new URL(authUrl.searchParams.get('redirect_uri'));
-  const stateParam = authUrl.searchParams.get('state');
-
-  const cbRes = await fetch(
-    `http://127.0.0.1:${redirectUri.port}/auth/callback?state=${encodeURIComponent(stateParam)}&code=mock-code-xyz`
-  );
-  assert.equal(cbRes.status, 500);
-  const cbHtml = await cbRes.text();
-  assert.ok(cbHtml.includes('凭证换取失败'));
-  assert.equal(cbHtml.includes('Google 登录未完成或被取消'), false);
-
-  const statusRes = await postAuth('/api/oauth/status');
-  assert.equal(statusRes.status, 200);
-  assert.equal(statusRes.json.oauth.status, 'failed');
-  assert.ok(statusRes.json.oauth.error.includes('invalid_client'));
-  assert.ok(
-    statusRes.json.logs.some((line) =>
-      line.includes('OAUTH_ERR stage=token code=OAUTH_EXCHANGE_FAILED status=401 oauth_error=invalid_client')
-    )
-  );
-
-  const logText = readFileSync(paths.logPath, 'utf8');
-  assert.equal(logText.includes(fakeClientSecret), false);
-  assert.equal(logText.includes('mock-code-xyz'), false);
-  assert.equal(logText.includes('secret_details_should_not_leak'), false);
 });
 
 test('active-work helpers filter permanent MCP/sidecar children and detect active LS items without leaking args', () => {
@@ -1671,7 +643,7 @@ test('HTTP switch and new-login pause with 409 ACTIVE_WORK_RUNNING unless force=
   let busy = true;
   const spawnedJobs = [];
   const srv = await createApp({
-    sidecarSdk: await resolveSidecarSdkForTest(),
+    sidecarSdk: createTestSidecarSdk(),
     env,
     port: 0,
     uiToken: 'guard-test-token',
@@ -1695,14 +667,13 @@ test('HTTP switch and new-login pause with 409 ACTIVE_WORK_RUNNING unless force=
     },
   });
 
-  const httpServer = await srv.start();
+  const request = await srv.start();
   t.after(async () => {
     await srv.close();
   });
 
-  const baseUrl = `http://127.0.0.1:${httpServer.address().port}`;
   const postAuth = async (path, body = {}) => {
-    const res = await fetch(`${baseUrl}${path}`, {
+    const res = await request(path, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -2001,7 +972,8 @@ test('platform helpers handle runtime detection, path conversion, app_storage de
   }
 });
 
-test('token-store: OS keyring & Windows cmdkey routing, cmdkey invocation, and macOS decoding', () => {
+test('token-store: OS keyring & Windows cmdkey routing, cmdkey invocation, and macOS decoding', (t) => {
+  const { env, root } = makeSandbox(t);
   assert.equal(shouldUseOsKeyring({ useKeyring: false }, {}, 'darwin'), false);
   assert.equal(shouldUseOsKeyring({ useKeyring: true }, { SWITCHER_TOKEN_STORE: 'file' }, 'darwin'), false);
   assert.equal(shouldUseOsKeyring({ useKeyring: true }, {}, 'wsl'), false);
@@ -2020,9 +992,9 @@ test('token-store: OS keyring & Windows cmdkey routing, cmdkey invocation, and m
   assert.equal(shouldClearWindowsKeyring({ useKeyring: true }, {}, 'darwin'), false);
 
   // resolvePaths disables OS keyring / cmdkey when isolated in tests or custom tokenPath/geminiDir
-  assert.equal(resolvePaths({ ANTIGRAVITY_GEMINI_DIR: '/tmp/custom-gem' }).useKeyring, false);
-  assert.equal(resolvePaths({}, { tokenPath: '/tmp/custom-token' }).useKeyring, false);
-  assert.equal(resolvePaths({ SWITCHER_TOKEN_STORE: 'file' }).useKeyring, false);
+  assert.equal(resolvePaths(env).useKeyring, false);
+  assert.equal(resolvePaths({ ANTIGRAVITY_APP_DATA_DIR: root }, { tokenPath: join(root, 'custom-token') }).useKeyring, false);
+  assert.equal(resolvePaths({ ANTIGRAVITY_APP_DATA_DIR: root, SWITCHER_TOKEN_STORE: 'file' }).useKeyring, false);
 
   assert.equal(KEYRING_SERVICE, 'gemini');
   assert.equal(KEYRING_USER, 'antigravity');
@@ -2161,7 +1133,7 @@ test('token-store: Windows cmdkey clear + file handoff and Darwin/Linux keyring 
 });
 
 test('switcher-worker --detach-worker double-fork DRY_RUN and runWorker with dataDirArg + job.context', async (t) => {
-  const { geminiDir, dataDir, paths } = makeSandbox(t);
+  const { geminiDir, dataDir, paths, env } = makeSandbox(t);
 
   // Part A: Double-fork --detach-worker trampoline spawns detached grandchild, exits 0 immediately, grandchild finishes DRY_RUN switch
   const tokenDetach = makeSampleToken('detach-user@example.com', '1//refresh-detach-777');
@@ -2176,6 +1148,7 @@ test('switcher-worker --detach-worker double-fork DRY_RUN and runWorker with dat
   await execFileAsync(NODE_BIN, [WORKER_PATH, '--detach-worker', detachJob.jobPath, dataDir], {
     env: {
       ...process.env,
+      ...env,
       SWITCHER_DRY_RUN: '1',
       ANTIGRAVITY_EXECUTABLE_DATA_DIR: '',
       ANTIGRAVITY_GEMINI_DIR: '',
@@ -2214,6 +1187,7 @@ test('switcher-worker --detach-worker double-fork DRY_RUN and runWorker with dat
     ctxJob.jobPath,
     {
       ...process.env,
+      ...env,
       SWITCHER_DRY_RUN: '1',
       ANTIGRAVITY_EXECUTABLE_DATA_DIR: '',
       ANTIGRAVITY_GEMINI_DIR: '',
@@ -2384,7 +1358,7 @@ test('syncActiveAccountTier persists tierName, pins active account first, and UI
   });
 
   const srv = await createApp({
-    sidecarSdk: await resolveSidecarSdkForTest(),
+    sidecarSdk: createTestSidecarSdk(),
     env,
     port: 0,
     uiToken: 'tier-ui-token',
@@ -2397,13 +1371,12 @@ test('syncActiveAccountTier persists tierName, pins active account first, and UI
     }),
   });
 
-  const httpServer = await srv.start();
+  const request = await srv.start();
   t.after(async () => {
     await srv.close();
   });
 
-  const baseUrl = `http://127.0.0.1:${httpServer.address().port}`;
-  const stateRes = await fetch(`${baseUrl}/api/state`, {
+  const stateRes = await request('/api/state', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -2422,7 +1395,7 @@ test('syncActiveAccountTier persists tierName, pins active account first, and UI
   assert.equal(payload.accounts[1].tierName, 'Google AI Pro');
 
   // Verify static UI bundle satisfies CSP + removes redundant active-account card & credential source label
-  const htmlRes = await fetch(`${baseUrl}/`);
+  const htmlRes = await request('/');
   assert.equal(htmlRes.status, 200);
   const html = await htmlRes.text();
   assert.equal(html.includes('当前登录账号'), false);
@@ -2431,9 +1404,9 @@ test('syncActiveAccountTier persists tierName, pins active account first, and UI
   assert.equal(html.includes('import-form'), false);
   assert.equal(html.includes('手动导入'), false);
 
-  const cssRes = await fetch(`${baseUrl}/styles.css`);
+  const cssRes = await request('/styles.css');
   assert.equal(cssRes.status, 200);
-  const jsRes = await fetch(`${baseUrl}/app.js`);
+  const jsRes = await request('/app.js');
   assert.equal(jsRes.status, 200);
   const js = await jsRes.text();
   assert.equal(js.includes('凭据源'), false);
@@ -2449,190 +1422,6 @@ test('syncActiveAccountTier persists tierName, pins active account first, and UI
   assert.ok(js.includes('usageLastFetchAt'));
   assert.ok(js.includes('forceRefresh: !isInitialExpand'));
   assert.ok(!js.includes('USAGE_AUTO_REFRESH_MS'));
-});
-
-test('cloudcode helpers extract profile, normalize quota summaries, handle fallback, and refresh expired tokens', async () => {
-  assert.equal(mapCloudCodePlatform('darwin', 'arm64'), 'DARWIN_ARM64');
-  assert.equal(mapCloudCodePlatform('darwin', 'x64'), 'DARWIN_AMD64');
-  assert.equal(mapCloudCodePlatform('win32', 'x64'), 'WINDOWS_AMD64');
-  assert.equal(mapCloudCodePlatform('linux', 'arm64'), 'LINUX_ARM64');
-  assert.equal(mapCloudCodePlatform('linux', 'x64'), 'LINUX_AMD64');
-
-  // paidTier takes priority over currentTier; falls back cleanly to currentTier
-  assert.deepEqual(
-    extractCloudCodeProfile({
-      currentTier: { name: 'Free' },
-      paidTier: { name: 'Google AI Pro', description: 'Pro' },
-      cloudaicompanionProject: { id: 'proj-abc-123' },
-    }),
-    { tierName: 'Google AI Pro', projectId: 'proj-abc-123' }
-  );
-  assert.deepEqual(
-    extractCloudCodeProfile({
-      currentTier: { description: 'Standard Tier' },
-      cloudaicompanionProject: 'string-proj-id\n../evil',
-    }),
-    { tierName: 'Standard Tier', projectId: '' }
-  );
-  assert.deepEqual(
-    extractCloudCodeProfile({
-      currentTier: { name: 'Standard Tier' },
-      cloudaicompanionProject: 'projects/my-proj/locations/global',
-    }),
-    { tierName: 'Standard Tier', projectId: 'projects/my-proj/locations/global' }
-  );
-  assert.deepEqual(extractCloudCodeProfile(null), { tierName: '', projectId: '' });
-
-  // normalizeQuotaSummary unwraps LS { response }, clamps numbers, drops invalid resetTime, and falls back to flat buckets
-  const wrapped = normalizeQuotaSummary({
-    response: {
-      description: 'Quota\ndesc',
-      groups: [
-        {
-          displayName: 'Gemini\tModels',
-          description: 'Gemini 4',
-          buckets: [
-            {
-              bucketId: 'gemini-weekly',
-              displayName: 'Weekly Limit Remaining',
-              window: 'WEEKLY',
-              remainingFraction: 1.4,
-              resetTime: '2026-11-25T03:00:02Z',
-            },
-            {
-              bucketId: 'gemini-5h',
-              window: '5h',
-              remainingFraction: -0.2,
-              resetTime: 'not-a-date',
-            },
-          ],
-        },
-      ],
-    },
-  });
-  assert.equal(wrapped.description, 'Quota desc');
-  assert.equal(wrapped.groups.length, 1);
-  assert.equal(wrapped.groups[0].displayName, 'Gemini Models');
-  assert.equal(wrapped.groups[0].buckets[0].window, 'weekly');
-  assert.equal(wrapped.groups[0].buckets[0].remainingFraction, 1);
-  assert.equal(wrapped.groups[0].buckets[0].resetTime, '2026-11-25T03:00:02Z');
-  assert.equal(wrapped.groups[0].buckets[1].remainingFraction, 0);
-  assert.equal(wrapped.groups[0].buckets[1].resetTime, '');
-
-  const flat = normalizeQuotaSummary({
-    buckets: [{ bucketId: 'b1', window: 'weekly', remainingFraction: 0.5 }],
-  });
-  assert.equal(flat.groups.length, 1);
-  assert.equal(flat.groups[0].displayName, 'Models');
-  assert.equal(flat.groups[0].buckets[0].remainingFraction, 0.5);
-
-  // postCloudCodeJson retries on fallback endpoint on HTTP 500 or 404
-  const seenUrls = [];
-  const resFallback = await postCloudCodeJson(
-    '/v1internal:loadCodeAssist',
-    'tok-1',
-    { test: true },
-    {
-      requestFn: async (url, opts) => {
-        seenUrls.push({ url, ua: opts.headers['User-Agent'] });
-        if (url.startsWith(DEFAULT_CLOUD_CODE_ENDPOINT)) {
-          return { status: 503, json: { error: 'busy' } };
-        }
-        return { status: 200, json: { ok: true } };
-      },
-    }
-  );
-  assert.equal(resFallback.status, 200);
-  assert.equal(seenUrls.length, 2);
-  assert.equal(seenUrls[0].url, `${DEFAULT_CLOUD_CODE_ENDPOINT}/v1internal:loadCodeAssist`);
-  assert.equal(seenUrls[1].url, `${FALLBACK_CLOUD_CODE_ENDPOINT}/v1internal:loadCodeAssist`);
-  assert.match(
-    seenUrls[0].ua,
-    /^antigravity\/hub\/\d+\.\d+\.\d+(?:-[A-Za-z0-9.]+)? \(os_type=(?:linux|darwin|windows); arch=[a-z0-9_]+; auth_method=consumer; purpose=aidev_client\)$/
-  );
-  assert.equal(
-    buildCloudCodeUserAgent({ version: '2.35.0', platform: 'win32', arch: 'x64' }),
-    'antigravity/hub/2.35.0 (os_type=windows; arch=amd64; auth_method=consumer; purpose=aidev_client)'
-  );
-  assert.equal(
-    buildCloudCodeUserAgent({ version: 'invalid\r\nheader', platform: 'darwin', arch: 'arm64' }),
-    'antigravity/hub/2.32.1 (os_type=darwin; arch=arm64; auth_method=consumer; purpose=aidev_client)'
-  );
-  assert.equal(
-    resolveAntigravityVersion({}, { candidates: ['/home/u/.antigravity-server/bin/2.99.1/language_server'] }),
-    '2.99.1'
-  );
-  assert.equal(resolveAntigravityVersion({ ANTIGRAVITY_IDE_VERSION: '3.1.0' }, { candidates: [] }), '3.1.0');
-  assert.equal(resolveAntigravityVersion({}, { candidates: [] }), '2.32.1');
-
-  // ensureFreshAccessToken skips HTTP for valid unexpired tokens
-  const nowMs = Date.parse('2026-11-20T00:00:00Z');
-  const freshToken = JSON.stringify({
-    token: {
-      access_token: 'ya29.still-valid',
-      refresh_token: '1//orig-refresh-keep',
-      token_type: 'Bearer',
-      expiry: '2026-11-20T00:30:00Z',
-    },
-    auth_method: 'consumer',
-    id_token_email: 'u@example.com',
-  });
-  let refreshCalls = 0;
-  const cachedTok = await ensureFreshAccessToken(freshToken, {
-    nowMs,
-    loadClients: () => [{ id: 'cid', secret: 'csec' }],
-    requestFn: async () => {
-      refreshCalls += 1;
-      return { status: 500, json: null };
-    },
-  });
-  assert.equal(cachedTok.refreshed, false);
-  assert.equal(cachedTok.accessToken, 'ya29.still-valid');
-  assert.equal(refreshCalls, 0);
-
-  // Refreshes expired token and preserves original refresh_token when omitted by Google
-  const expiredToken = JSON.stringify({
-    token: {
-      access_token: 'ya29.expired',
-      refresh_token: '1//orig-refresh-keep',
-      token_type: 'Bearer',
-      expiry: '2026-11-19T23:55:00Z',
-    },
-    auth_method: 'consumer',
-    id_token_email: 'u@example.com',
-    writer_id: 'keep-writer',
-  });
-  const refreshed = await ensureFreshAccessToken(expiredToken, {
-    nowMs,
-    loadClients: () => [{ id: 'cid', secret: 'csec' }],
-    requestFn: async (url, opts) => {
-      assert.equal(url, 'https://oauth2.googleapis.com/token');
-      const params = new URLSearchParams(opts.body);
-      assert.equal(params.get('grant_type'), 'refresh_token');
-      assert.equal(params.get('refresh_token'), '1//orig-refresh-keep');
-      return {
-        status: 200,
-        json: { access_token: 'ya29.fresh-access', expires_in: 3600 },
-      };
-    },
-  });
-  assert.equal(refreshed.refreshed, true);
-  assert.equal(refreshed.accessToken, 'ya29.fresh-access');
-  const parsedUpdated = JSON.parse(refreshed.updatedTokenRaw);
-  assert.equal(parsedUpdated.token.refresh_token, '1//orig-refresh-keep');
-  assert.equal(parsedUpdated.token.access_token, 'ya29.fresh-access');
-  assert.equal(parsedUpdated.writer_id, 'keep-writer');
-
-  // Maps invalid_grant to TOKEN_REFRESH_REVOKED
-  await assert.rejects(
-    () =>
-      ensureFreshAccessToken(expiredToken, {
-        nowMs,
-        loadClients: () => [{ id: 'cid', secret: 'csec' }],
-        requestFn: async () => ({ status: 400, json: { error: 'invalid_grant' } }),
-      }),
-    /TOKEN_REFRESH_REVOKED/
-  );
 });
 
 test('vault updateAccountSyncFields updates tier/project/token without altering lastUsedAt or exposing internal fields', (t) => {
@@ -2669,294 +1458,378 @@ test('vault updateAccountSyncFields updates tier/project/token without altering 
   assert.equal('tokenRaw' in pub[0], false);
 });
 
-test('Option B sync-tiers and per-account usage: OAuth tier fetch, LS fast path, remote 401/404 retries, cache & leak checks', async (t) => {
-  const { env, paths } = makeSandbox(t);
-  const activeToken = JSON.stringify({
-    token: {
-      access_token: 'ya29.active-token',
-      refresh_token: '1//refresh-active-111',
-      token_type: 'Bearer',
-      expiry: new Date(Date.now() + 3600_000).toISOString(),
-    },
-    auth_method: 'consumer',
-    id_token_email: 'active@example.com',
-  });
-  writeFileSync(paths.tokenPath, activeToken, { encoding: 'utf8', mode: 0o600 });
-  const activeAcc = importAccount(paths, {
-    credentialText: activeToken,
-    label: 'Main',
-    tierName: 'Google AI Pro',
-  });
-
-  // Standby account with expired token and stale cached projectId
-  const standbyExpired = JSON.stringify({
-    token: {
-      access_token: 'ya29.standby-stale',
-      refresh_token: '1//refresh-standby-222',
-      token_type: 'Bearer',
-      expiry: '2020-01-01T00:00:00Z',
-    },
-    auth_method: 'consumer',
-    id_token_email: 'standby@example.com',
-  });
-  const standbyAcc = importAccount(paths, {
-    credentialText: standbyExpired,
-    label: 'Standby',
-    projectId: 'proj-stale-000',
-  });
-  const standbyBeforeLastUsed = loadVault(paths).accounts.find((a) => a.id === standbyAcc.id).lastUsedAt;
-
-  // Revoked account for error handling check
-  const revokedToken = JSON.stringify({
-    token: {
-      access_token: 'ya29.revoked-old',
-      refresh_token: '1//refresh-revoked-333',
-      token_type: 'Bearer',
-      expiry: '2020-01-01T00:00:00Z',
-    },
-    auth_method: 'consumer',
-    id_token_email: 'revoked@example.com',
-  });
-  const revokedAcc = importAccount(paths, {
-    credentialText: revokedToken,
-    label: 'Revoked',
-  });
-
-  const lsRpcCalls = [];
-  const remoteCalls = [];
-  let allowUsageSuccess = false;
-  let simulateStandbyProject404 = true;
-  let clockNow = Date.parse('2026-11-20T02:00:00Z');
-  const fakeClientId = '1071006060591-cloudcodeunit.apps.googleusercontent.com';
-  const fakeClientSecret = `${SYNTH_SECRET_PREFIX}fakeCloudCodeUnitTestSecret000000`;
-
-  const srv = await createApp({
-    sidecarSdk: await resolveSidecarSdkForTest(),
-    env,
-    port: 0,
-    uiToken: 'cloudcode-ui-token',
-    lsAddress: 'test.invalid',
-    csrfToken: 'test-csrf',
-    getUserStatus: async () => ({
-      lsConnected: true,
-      email: 'active@example.com',
-      tierName: 'Google AI Pro',
-    }),
-    callLsRpc: async (_env, method, opts) => {
-      lsRpcCalls.push({ method, body: opts?.body || {} });
-      return {
-        response: {
-          groups: [
-            {
-              displayName: 'Gemini Models',
-              buckets: [
-                {
-                  bucketId: 'gemini-weekly',
-                  window: 'weekly',
-                  remainingFraction: 0.66,
-                  resetTime: '2026-11-25T03:00:02Z',
-                },
-              ],
-            },
-          ],
-        },
-      };
-    },
-    cloudCodeOptions: {
-      nowFn: () => clockNow,
-      cacheTtlMs: 30_000,
-    },
-    oauthOptions: {
-      loadClients: () => [{ id: fakeClientId, secret: fakeClientSecret }],
-      openBrowser: () => ({ opened: true }),
-      requestFn: async (urlStr, opts) => {
-        remoteCalls.push({ urlStr, auth: opts?.headers?.Authorization || '', body: opts?.body || '' });
-
-        if (urlStr === 'https://oauth2.googleapis.com/token') {
-          const params = new URLSearchParams(opts.body);
-          const grant = params.get('grant_type');
-          const rt = params.get('refresh_token');
-          if (grant === 'authorization_code') {
-            return {
-              status: 200,
-              json: {
-                access_token: 'ya29.oauth-new-access',
-                refresh_token: '1//oauth-new-refresh-444',
-                expires_in: 3600,
-              },
-            };
-          }
-          if (rt === '1//refresh-standby-222') {
-            return {
-              status: 200,
-              json: { access_token: 'ya29.standby-refreshed', expires_in: 3600 },
-            };
-          }
-          if (rt === '1//refresh-revoked-333') {
-            return { status: 400, json: { error: 'invalid_grant' } };
-          }
-        }
-
-        if (urlStr === 'https://www.googleapis.com/oauth2/v2/userinfo') {
-          return {
-            status: 200,
-            json: { email: 'oauthadded@example.com', verified_email: true },
-          };
-        }
-
-        if (urlStr.endsWith('/v1internal:loadCodeAssist')) {
-          const auth = opts?.headers?.Authorization || '';
-          if (auth === 'Bearer ya29.oauth-new-access') {
-            return {
-              status: 200,
-              json: {
-                paidTier: { name: 'Google AI Ultra' },
-                cloudaicompanionProject: { id: 'proj-oauth-new' },
-              },
-            };
-          }
-          if (auth === 'Bearer ya29.standby-refreshed') {
-            // Simulate primary 500 -> fallback 200 on first hit
-            if (urlStr.startsWith(DEFAULT_CLOUD_CODE_ENDPOINT)) {
-              return { status: 500, json: null };
-            }
-            return {
-              status: 200,
-              json: {
-                paidTier: { name: 'Google AI Pro' },
-                cloudaicompanionProject: { id: 'proj-standby-fresh' },
-              },
-            };
-          }
-          if (auth === 'Bearer ya29.active-token') {
-            return {
-              status: 200,
-              json: { currentTier: { name: 'Free' }, cloudaicompanionProject: 'proj-active-1' },
-            };
-          }
-        }
-
-        if (urlStr.endsWith('/v1internal:retrieveUserQuotaSummary')) {
-          const parsedBody = JSON.parse(opts.body || '{}');
-          if (parsedBody.project === 'proj-stale-000') {
-            return { status: 404, json: { error: 'project_not_found' } };
-          }
-          if (!allowUsageSuccess) {
-            return { status: 500, json: null };
-          }
-          return {
-            status: 200,
-            json: {
-              groups: [
-                {
-                  displayName: 'Claude and GPT models',
-                  buckets: [
-                    { bucketId: '3p-weekly', window: 'weekly', remainingFraction: 0.88, resetTime: '2026-11-26T18:00:00Z' },
-                    { bucketId: '3p-5h', window: '5h', remainingFraction: 1, resetTime: '2026-11-20T07:00:00Z' },
-                  ],
-                },
-              ],
-            },
-          };
-        }
-
-        return { status: 500, json: null };
-      },
-    },
-  });
-
-  const httpServer = await srv.start();
-  t.after(async () => {
-    await srv.close();
-  });
-
-  const baseUrl = `http://127.0.0.1:${httpServer.address().port}`;
-  const postAuth = async (path, body = {}) => {
-    const res = await fetch(`${baseUrl}${path}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Sidecar-Token': 'cloudcode-ui-token',
-      },
-      body: JSON.stringify(body),
-    });
-    const text = await res.text();
-    assert.equal(text.includes(fakeClientSecret), false, `Client secret leak in ${path}`);
-    assert.equal(text.includes('refresh_token'), false, `refresh_token leak in ${path}`);
-    assert.equal(text.includes('access_token'), false, `access_token leak in ${path}`);
-    assert.equal(text.includes('1//'), false, `Refresh token value leak in ${path}`);
-    assert.equal(text.includes('ya29.'), false, `Access token value leak in ${path}`);
-    assert.equal(text.includes('proj-standby-fresh'), false, `projectId leak in ${path}`);
-    assert.equal(text.includes('proj-oauth-new'), false, `projectId leak in ${path}`);
-    return { status: res.status, json: JSON.parse(text) };
+function quotaSummary(remainingFraction, resetTime = '') {
+  return {
+    groups: [{
+      displayName: 'Gemini',
+      buckets: [{ bucketId: 'gemini-weekly', window: 'weekly', remainingFraction, resetTime }],
+    }],
   };
+}
 
-  // 1. OAuth add enriches tierName & projectId immediately upon callback completion
-  const startRes = await postAuth('/api/oauth/start', { label: 'UltraNew' });
-  const authUrl = new URL(startRes.json.oauth.authUrl);
-  const cbUrl = new URL(authUrl.searchParams.get('redirect_uri'));
-  const cbRes = await fetch(
-    `http://127.0.0.1:${cbUrl.port}/auth/callback?state=${encodeURIComponent(authUrl.searchParams.get('state'))}&code=code-1`
-  );
-  assert.equal(cbRes.status, 200);
-  const oauthStatus = await postAuth('/api/oauth/status');
-  const oauthAddedPub = oauthStatus.json.accounts.find((a) => a.label === 'UltraNew');
-  assert.ok(oauthAddedPub);
-  assert.equal(oauthAddedPub.tierName, 'Google AI Ultra');
-  assert.equal(
-    loadVault(paths).accounts.find((a) => a.id === oauthAddedPub.id).projectId,
-    'proj-oauth-new'
-  );
+function savedAccount(paths, email) {
+  return importAccount(paths, { credentialText: makeSampleToken(email) });
+}
 
-  // 2. sync-tiers with onlyMissing=true skips accounts that already have tierName, syncs standby, preserves lastUsedAt
-  const syncMissingRes = await postAuth('/api/accounts/sync-tiers', { onlyMissing: true });
-  assert.equal(syncMissingRes.status, 200);
-  assert.equal(syncMissingRes.json.sync.skippedCount, 2); // active + oauthAdded already have tierName
-  const standbyPubAfterSync = syncMissingRes.json.accounts.find((a) => a.id === standbyAcc.id);
-  assert.equal(standbyPubAfterSync.tierName, 'Google AI Pro');
-  const standbyAfterVault = loadVault(paths).accounts.find((a) => a.id === standbyAcc.id);
-  assert.equal(standbyAfterVault.lastUsedAt, standbyBeforeLastUsed);
-  assert.equal(standbyAfterVault.projectId, 'proj-standby-fresh');
-  assert.equal(JSON.parse(standbyAfterVault.tokenRaw).token.refresh_token, '1//refresh-standby-222');
+test('active LS quota is persisted privately and inactive usage is projected without RPC', async (t) => {
+  const { env, paths } = makeSandbox(t);
+  const active = savedAccount(paths, 'active@example.com');
+  const other = savedAccount(paths, 'other@example.com');
+  const resetTime = new Date(Date.now() - 60_000).toISOString();
+  const rpc = t.mock.fn(async () => ({ response: quotaSummary(0.08, resetTime) }));
+  const service = createQuotaService({ paths, env, callLsRpcFn: rpc });
+  const live = await service.getAccountUsage({ id: active.id, activeAccountId: active.id, lsConnected: true });
+  assert.equal(live.source, 'live');
+  assert.equal(live.usage.groups[0].buckets[0].remainingFraction, 0.08);
+  assert.deepEqual(rpc.mock.calls.map(c => c.arguments), [[env, 'RetrieveUserQuotaSummary', { timeoutMs: 2500, body: {} }]]);
+  const record = loadQuotaSnapshots(paths).accounts[active.id];
+  assert.equal(record.accountId, active.id);
+  assert.equal(record.capturedAt, live.capturedAt);
+  assert.ok(Number.isFinite(Date.parse(record.capturedAt)));
+  if (process.platform !== 'win32') assert.equal(lstatSync(paths.quotaSnapshotsPath).mode & 0o777, 0o600);
 
-  // Reset standby projectId back to stale to test /api/accounts/usage 404 projectId auto-recovery
-  updateAccountSyncFields(paths, [{ id: standbyAcc.id, projectId: 'proj-stale-000' }]);
+  const inactive = () => service.getAccountUsage({
+    id: active.id, activeAccountId: other.id, lsConnected: true, forceRefresh: true,
+  });
+  const projected = await inactive();
+  assert.equal(projected.source, 'snapshot');
+  assert.equal(projected.hasSnapshot, true);
+  assert.equal(projected.estimatedAnyReset, true);
+  assert.equal(projected.capturedAt, live.capturedAt);
+  const bucket = projected.usage.groups[0].buckets[0];
+  assert.equal(bucket.estimatedReset, true);
+  assert.equal(bucket.remainingFraction, 1);
+  assert.equal(bucket.snapshotRemainingFraction, 0.08);
+  assert.deepEqual(loadQuotaSnapshots(paths).accounts[active.id], record);
 
-  // 3. Active account usage uses local LS fast path + respects cache + forceRefresh
-  const activeUsage1 = await postAuth('/api/accounts/usage', { id: activeAcc.id });
-  assert.equal(activeUsage1.status, 200);
-  assert.equal(activeUsage1.json.usage.source, 'ls');
-  assert.equal(activeUsage1.json.usage.groups[0].buckets[0].remainingFraction, 0.66);
-  assert.equal(lsRpcCalls.length, 1);
-  assert.deepEqual(lsRpcCalls[0].body, {});
+  deleteQuotaSnapshot(paths, active.id);
+  const missing = await inactive();
+  assert.equal(missing.source, 'none');
+  assert.equal(missing.hasSnapshot, false);
+  assert.equal(missing.usage, null);
+  assert.equal(rpc.mock.callCount(), 1);
+});
 
-  // Within TTL -> cache hit, no extra RPC
-  const activeUsageCached = await postAuth('/api/accounts/usage', { id: activeAcc.id });
-  assert.equal(activeUsageCached.status, 200);
-  assert.equal(lsRpcCalls.length, 1);
+test('snapshot projection applies reset and stale boundaries and preserves disabled buckets', () => {
+  const capturedAt = '2026-01-01T00:00:00Z';
+  const resetTime = '2026-01-02T00:00:00Z';
+  const summary = quotaSummary(0.1, resetTime);
+  summary.groups[0].buckets.push({ remainingFraction: 0.2, disabled: true, resetTime });
+  const project = offset => projectQuotaSummary({ capturedAt, summary }, { nowMs: Date.parse(resetTime) + offset });
+  assert.equal(project(-1).estimatedAnyReset, false);
+  assert.equal(project(0).isStale, false);
+  assert.equal(project(0).estimatedAnyReset, true);
+  assert.equal(project(1).isStale, true);
+  const disabled = project(1).usage.groups[0].buckets[1];
+  assert.equal(disabled.estimatedReset, false);
+  assert.equal(disabled.remainingFraction, 0.2);
+});
 
-  // forceRefresh=true bypasses cache and forwards { forceRefresh: true } to LS
-  const activeUsageForce = await postAuth('/api/accounts/usage', { id: activeAcc.id, forceRefresh: true });
-  assert.equal(activeUsageForce.status, 200);
-  assert.equal(lsRpcCalls.length, 2);
-  assert.deepEqual(lsRpcCalls[1].body, { forceRefresh: true });
+test('snapshot storage rejects symlinks without reading or overwriting the target', {
+  skip: process.platform === 'win32',
+}, (t) => {
+  const { root, paths } = makeSandbox(t);
+  const account = savedAccount(paths, 'sandbox@example.com');
+  const record = { accountId: account.id, summary: quotaSummary(0.4) };
+  upsertQuotaSnapshot(paths, record);
+  const original = readFileSync(paths.quotaSnapshotsPath, 'utf8');
+  const target = join(root, 'target.json');
+  writeFileSync(target, original);
+  rmSync(paths.quotaSnapshotsPath);
+  symlinkSync(target, paths.quotaSnapshotsPath);
+  assert.deepEqual(loadQuotaSnapshots(paths).accounts, {});
+  assert.throws(() => upsertQuotaSnapshot(paths, record), /UNSAFE_FILE_TYPE/);
+  assert.equal(readFileSync(target, 'utf8'), original);
+  assert.ok(lstatSync(paths.quotaSnapshotsPath).isSymbolicLink());
+});
 
-  // 4. Standby non-active account usage recovers from 404 stale projectId and returns remote quota
-  allowUsageSuccess = true;
-  const standbyUsage = await postAuth('/api/accounts/usage', { id: standbyAcc.id });
-  assert.equal(standbyUsage.status, 200);
-  assert.equal(standbyUsage.json.usage.source, 'remote');
-  assert.equal(standbyUsage.json.tierName, 'Google AI Pro');
-  assert.equal(standbyUsage.json.usage.groups[0].displayName, 'Claude and GPT models');
-  assert.equal(standbyUsage.json.usage.groups[0].buckets.length, 2);
-  assert.equal(loadVault(paths).accounts.find((a) => a.id === standbyAcc.id).projectId, 'proj-standby-fresh');
+test('active quota coalesces in-flight reads, expires at TTL, and discards invalidated results', async (t) => {
+  const { env, paths } = makeSandbox(t);
+  const { id: accountId } = savedAccount(paths, 'cache@example.com');
+  let now = 1000;
+  let finish;
+  const rpc = t.mock.fn(() => new Promise(resolve => { finish = resolve; }));
+  const service = createQuotaService({ paths, env, callLsRpcFn: rpc, nowFn: () => now, cacheTtlMs: 100 });
+  const fetchActive = (forceRefresh = false) => service.fetchActiveQuota({ accountId, forceRefresh });
+  const first = fetchActive();
+  const concurrent = fetchActive();
+  assert.equal(rpc.mock.callCount(), 1);
+  finish(quotaSummary(0.5));
+  assert.deepEqual(await first, await concurrent);
+  now += 99;
+  assert.deepEqual(await fetchActive(), await first);
+  assert.equal(rpc.mock.callCount(), 1);
+  now++;
+  const expired = fetchActive();
+  assert.equal(rpc.mock.callCount(), 2);
+  finish(quotaSummary(0.25));
+  assert.equal((await expired).usage.groups[0].buckets[0].remainingFraction, 0.25);
+  const forced = fetchActive(true);
+  assert.equal(rpc.mock.callCount(), 3);
+  assert.deepEqual(rpc.mock.calls[2].arguments[2].body, { forceRefresh: true });
+  service.invalidateCache();
+  deleteQuotaSnapshot(paths, accountId);
+  finish(quotaSummary(0.8));
+  assert.equal(await forced, null);
+  assert.deepEqual(loadQuotaSnapshots(paths).accounts, {});
+});
 
-  // 5. Validation & revoked error handling
-  const badIdRes = await postAuth('/api/accounts/usage', { id: 'not-a-uuid' });
-  assert.equal(badIdRes.status, 400);
-  const missingIdRes = await postAuth('/api/accounts/usage', { id: '00000000-0000-0000-0000-000000000000' });
-  assert.equal(missingIdRes.status, 400);
-  const revokedUsage = await postAuth('/api/accounts/usage', { id: revokedAcc.id });
-  assert.equal(revokedUsage.status, 400);
-  assert.ok(revokedUsage.json.error.includes('授权已失效'));
+async function startQuotaSidecar(t, env, options = {}) {
+  const srv = await createApp({ sidecarSdk: createTestSidecarSdk(), env, uiToken: 'test-ui', port: 0, ...options });
+  const request = await srv.start();
+  t.after(() => srv.close());
+  return async (path, data = {}) => {
+    const res = await request(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Sidecar-Token': 'test-ui' },
+      body: JSON.stringify(data),
+    });
+    assert.equal(res.status, 200, path);
+    return res.json();
+  };
+}
+
+test('sidecar usage fetches only the active account and removal deletes only its target snapshot', async (t) => {
+  const { env, paths } = makeSandbox(t);
+  const active = savedAccount(paths, 'active@example.com');
+  const backup = savedAccount(paths, 'backup@example.com');
+  const missing = savedAccount(paths, 'missing@example.com');
+  writeFileSync(paths.tokenPath, makeSampleToken('active@example.com'));
+  upsertQuotaSnapshot(paths, { accountId: backup.id, summary: quotaSummary(0.42) });
+  const methods = [];
+  const post = await startQuotaSidecar(t, env, {
+    callLsRpc: async (_env, method) => {
+      methods.push(method);
+      if (method === 'GetUserStatus') return { userStatus: { email: 'active@example.com' } };
+      return quotaSummary(0.73);
+    },
+  });
+  const usage = id => post('/api/accounts/usage', { id, forceRefresh: true });
+  assert.equal((await usage(backup.id)).source, 'snapshot');
+  assert.equal((await usage(missing.id)).source, 'none');
+  assert.deepEqual(methods, []);
+  const live = await usage(active.id);
+  assert.equal(live.source, 'live');
+  assert.equal(live.usage.groups[0].buckets[0].remainingFraction, 0.73);
+  assert.deepEqual(methods, ['GetUserStatus', 'RetrieveUserQuotaSummary']);
+  await post('/api/accounts/remove', { id: backup.id });
+  assert.deepEqual(Object.keys(loadQuotaSnapshots(paths).accounts), [active.id]);
+});
+
+for (const optIn of [false, true]) {
+  test(`sidecar switch persists outgoing quota before dispatch with onboarding opt-in ${optIn}`, async (t) => {
+    const { env, paths } = makeSandbox(t);
+    const active = savedAccount(paths, 'active@example.com');
+    const backup = savedAccount(paths, 'backup@example.com');
+    upsertQuotaSnapshot(paths, { accountId: backup.id, summary: quotaSummary(0.9) });
+    const methods = [];
+    let outgoing;
+    let job;
+    const post = await startQuotaSidecar(t, env, {
+      callLsRpc: async (_env, method, opts) => {
+        methods.push([method, opts.body]);
+        if (method === 'GetUserStatus') return { userStatus: { email: 'active@example.com' } };
+        return quotaSummary(0.03);
+      },
+      detectActiveWork: async () => ({ busy: false }),
+      spawnWorker: (path) => {
+        outgoing = loadQuotaSnapshots(paths).accounts[active.id];
+        job = decryptPayload(JSON.parse(readFileSync(path, 'utf8')), getOrCreateKey(paths));
+      },
+    });
+    if (optIn) {
+      const updated = await post('/api/settings/update', {
+        skipOnboardingPrompt: true, naturalPauseEnabled: false, dynamicThresholdEnabled: false,
+      });
+      assert.equal(updated.settings.skipOnboardingPrompt, true);
+      assert.equal(updated.settings.naturalPauseEnabled, false);
+      assert.equal(updated.settings.dynamicThresholdEnabled, false);
+      assert.equal(updated.quotaAlert.level, 'hard');
+      assert.equal(updated.quotaAlert.bestCandidate.id, backup.id);
+      assert.doesNotMatch(JSON.stringify(updated.quotaAlert), /1\/\/|backup@example\.com/);
+      if (process.platform !== 'win32') {
+        for (const path of [paths.settingsPath, paths.quotaAlertPath]) {
+          assert.equal(lstatSync(path).mode & 0o777, 0o600);
+        }
+      }
+    }
+    const result = await post('/api/accounts/switch', { id: backup.id });
+    assert.equal(result.switching, true);
+    assert.deepEqual(methods.at(-1), ['RetrieveUserQuotaSummary', { forceRefresh: true }]);
+    assert.equal(outgoing.syncSource, 'pre_switch_snapshot');
+    assert.equal(outgoing.summary.groups[0].buckets[0].remainingFraction, 0.03);
+    assert.equal(job.syncOnboarding, optIn);
+    if (optIn) assert.equal(job.relaunchPauseMs ?? 0, 0);
+    else assert.ok(job.relaunchPauseMs >= 3000 && job.relaunchPauseMs <= 8000);
+  });
+}
+
+test('idle sidecar makes zero LS requests over multiple polling intervals', async (t) => {
+  const { env, paths } = makeSandbox(t);
+  const rpc = t.mock.fn(async () => null);
+  t.mock.timers.enable({ apis: ['setInterval', 'setTimeout'] });
+  const srv = await createApp({ sidecarSdk: createTestSidecarSdk(), env, callLsRpc: rpc });
+  t.after(() => srv.close());
+  t.mock.timers.tick(180_000);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(rpc.mock.callCount(), 0);
+  assert.equal(existsSync(paths.quotaAlertPath), false);
+});
+
+test('filesystem trigger refreshes quota, throttles a second write, and accepts a later trigger', async (t) => {
+  const { paths, env } = makeSandbox(t);
+  const active = savedAccount(paths, 'watch@example.com');
+  const methods = [];
+  let quota = 0.01;
+  const srv = await createApp({
+    sidecarSdk: createTestSidecarSdk(), env,
+    callLsRpc: async (_env, method) => {
+      methods.push(method);
+      if (method === 'GetUserStatus') return { userStatus: { email: 'watch@example.com' } };
+      return quotaSummary(quota);
+    },
+  });
+  t.after(() => srv.close());
+  let now = Date.now();
+  t.mock.method(Date, 'now', () => now);
+  const trigger = () => writeQuotaRefreshTrigger(paths, { nowMs: now, minIntervalMs: 0 });
+  const waitForLevel = async level => {
+    for (let i = 0; i < 100; i++) {
+      if (readQuotaAlertSnapshot(paths)?.level === level) return;
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+    assert.fail('Timed out waiting for quota alert level ' + level);
+  };
+  trigger();
+  await waitForLevel('hard');
+  assert.equal(loadQuotaSnapshots(paths).accounts[active.id].syncSource, 'hook_trigger');
+  const oneRefresh = ['GetUserStatus', 'RetrieveUserQuotaSummary'];
+  assert.deepEqual(methods, oneRefresh);
+  quota = 0.85;
+  now += 60_000;
+  trigger();
+  await new Promise(resolve => setTimeout(resolve, 450));
+  assert.deepEqual(methods, oneRefresh);
+  now += 30_000;
+  trigger();
+  await waitForLevel('ok');
+  assert.deepEqual(methods, [...oneRefresh, ...oneRefresh]);
+});
+
+test('public UI uses external assets and local quota and native account controls', () => {
+  const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  const js = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const css = readFileSync(new URL('../public/styles.css', import.meta.url), 'utf8');
+  for (const asset of [html, js]) {
+    assert.doesNotMatch(asset, /innerHTML|outerHTML|insertAdjacentHTML|\/api\/oauth\/|v1internal|antigravity\/hub\//i);
+    assert.doesNotMatch(asset, /<style\b|\bstyle\s*=/i);
+  }
+  assert.doesNotMatch(html, /\bon\w+\s*=/i);
+  for (const [, attrs, body] of html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)) {
+    assert.match(attrs, /\ssrc\s*=\s*["']\/(?!\/)/i);
+    assert.equal(body.trim(), '');
+  }
+  for (const id of [
+    'guard-alert-enabled',
+    'guard-watch-weekly',
+    'guard-watch-5h',
+    'guard-dynamic-threshold',
+    'guard-natural-pause',
+    'guard-auto-switch',
+    'guard-auto-resume',
+    'guard-skip-onboarding',
+  ]) {
+    const group = html.match(new RegExp(`(<div\\b[^>]*\\sid\\s*=\\s*(["'])${id}\\2[^>]*>)([\\s\\S]*?)<\\/div>`));
+    assert.ok(group, `Missing radiogroup ${id}`);
+    assert.match(group[1], /\sclass\s*=\s*(["'])(?:[^"']*\s)?guard-segmented(?:\s[^"']*)?\1/i);
+    assert.match(group[1], /\srole\s*=\s*(["'])radiogroup\1/i);
+    const buttons = [...group[3].matchAll(/<button\b[^>]*>/gi)].map(([button]) => button);
+    assert.equal(buttons.length, 2);
+    for (const button of buttons) {
+      assert.match(button, /\stype\s*=\s*(["'])button\1/i);
+      assert.match(button, /\sclass\s*=\s*(["'])(?:[^"']*\s)?guard-seg-btn(?:\s[^"']*)?\1/i);
+      assert.match(button, /\srole\s*=\s*(["'])radio\1/i);
+      assert.match(button, /\saria-checked\s*=\s*(["'])(?:true|false)\1/);
+    }
+    assert.match(buttons[0], /\sdata-value\s*=\s*(["'])false\1/);
+    assert.match(buttons[1], /\sdata-value\s*=\s*(["'])true\1/);
+    assert.ok(js.includes(id));
+  }
+  const posSkipOnboarding = html.search(/\sid\s*=\s*(["'])guard-skip-onboarding\1/);
+  const posAutoSwitch = html.search(/\sid\s*=\s*(["'])guard-auto-switch\1/);
+  const posAutoResume = html.search(/\sid\s*=\s*(["'])guard-auto-resume\1/);
+  const posThreshold = html.search(/\sid\s*=\s*(["'])guard-threshold\1/);
+  assert.ok(posSkipOnboarding > 0 && posSkipOnboarding < posAutoSwitch);
+  assert.ok(posAutoSwitch < posAutoResume && posAutoResume < posThreshold);
+  assert.doesNotMatch(html, /<input\b[^>]*\stype\s*=\s*(?:(["'])checkbox\1|checkbox(?=[\s/>]))/i);
+  assert.doesNotMatch(html, /\sid\s*=\s*(?:(["'])guard-save-btn\1|guard-save-btn(?=[\s/>]))/i);
+  assert.match(html, /<button\b[^>]*\sclass\s*=\s*(["'])(?:[^"']*\s)?info-tip-btn(?:\s[^"']*)?\1/i);
+  assert.match(html, /<[^>]+\srole\s*=\s*(["'])tooltip\1/i);
+  assert.match(css, /\.notice-warn\s*\{/);
+  assert.match(js, /showNotice\([^,\n]+,\s*'warn'/);
+  assert.match(js, /err\.retryAfterSec\s*=/);
+  assert.match(js, /err\?\.status === 429 \|\| err\?\.code === 'RATE_LIMITED'/);
+  assert.ok(js.includes('/api/accounts/new-login'));
+  assert.ok(js.includes('estimatedReset'));
+  assert.doesNotMatch(js, /\b(alert|confirm|prompt)\s*\(/);
+});
+
+test('worker changes onboarding only with opt-in and applies the pause only during a real switch', async (t) => {
+  const { env, paths, root } = makeSandbox(t);
+  const target = savedAccount(paths, 'target@example.com');
+  const storage = env.ANTIGRAVITY_APP_STORAGE_PATH;
+  const prior = JSON.stringify({ 'agy.onboarding.lastLoginUsername': 'prior@example.com', zoomLevel: 2 });
+  writeFileSync(storage, prior);
+  // Exercise the normal worker branch against an empty Windows installation.
+  // Every desktop and process-management executable resolves inside the fixture.
+  const workerEnv = {
+    ...env, SystemRoot: join(root, 'Windows'), ProgramFiles: join(root, 'Program Files'),
+    APPDATA: join(root, 'Roaming'), LOCALAPPDATA: join(root, 'Local'),
+  };
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform');
+  Object.defineProperty(process, 'platform', { ...platform, value: 'win32' });
+  try {
+    const run = async (syncOnboarding, dryRun = false) => {
+      const { jobPath } = prepareSwitchJob(paths, {
+        mode: 'switch', accountId: target.id, env: workerEnv, syncOnboarding, relaunchPauseMs: 10,
+      });
+      await runWorker(jobPath, { ...workerEnv, SWITCHER_DRY_RUN: dryRun ? '1' : '0' });
+      const log = readFileSync(paths.logPath, 'utf8');
+      rmSync(paths.logPath);
+      return log;
+    };
+    const disabled = await run(false);
+    assert.equal(readFileSync(storage, 'utf8'), prior);
+    assert.match(disabled, /ONBOARDING_SYNC skipped=disabled/);
+    assert.match(disabled, /NATURAL_PAUSE ms=10[\s\S]*RELAUNCH_SKIPPED_MISSING_BIN/);
+    assert.doesNotMatch(await run(true, true), /NATURAL_PAUSE/);
+    const enabled = await run(true);
+    assert.match(enabled, /ONBOARDING_SYNC updated=1 reason=UPDATED/);
+    assert.deepEqual(JSON.parse(readFileSync(storage, 'utf8')), {
+      'agy.onboarding.lastLoginUsername': 'target@example.com', 'agy.onboarding.lastLoginIsGcpTos': 'false',
+      zoomLevel: 2,
+    });
+  } finally {
+    Object.defineProperty(process, 'platform', platform);
+  }
+});
+
+test('tokenless inactive usage is local and live status takes precedence over a stale credential', async (t) => {
+  const { env, paths } = makeSandbox(t);
+  const active = savedAccount(paths, 'live@example.com');
+  const backup = savedAccount(paths, 'old@example.com');
+  const rpc = t.mock.fn(async (_env, method) => method === 'GetUserStatus'
+    ? { userStatus: { email: 'live@example.com' } } : quotaSummary(0.73));
+  const post = await startQuotaSidecar(t, env, { callLsRpc: rpc });
+  const usage = id => post('/api/accounts/usage', { id, forceRefresh: true });
+  assert.equal((await usage(backup.id)).source, 'none');
+  assert.equal(rpc.mock.callCount(), 0);
+  writeFileSync(paths.tokenPath, makeSampleToken('old@example.com'));
+  const state = await post('/api/state');
+  assert.equal(state.accounts.find(a => a.isActive).id, active.id);
+  rpc.mock.resetCalls();
+  assert.equal((await usage(backup.id)).source, 'none');
+  assert.equal(rpc.mock.callCount(), 0);
+  assert.equal((await usage(active.id)).source, 'live');
+  assert.deepEqual(Object.keys(loadQuotaSnapshots(paths).accounts), [active.id]);
 });

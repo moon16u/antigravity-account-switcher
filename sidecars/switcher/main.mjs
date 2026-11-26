@@ -1,22 +1,25 @@
-import { readFileSync, realpathSync } from 'node:fs';
+import { readFileSync, realpathSync, watch } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { callLsRpc, detectActiveWork } from './active-work.mjs';
-import { createCloudCodeService, normalizeQuotaSummary } from './cloudcode.mjs';
-import { createOAuthManager } from './oauth.mjs';
+import { createQuotaService, deleteQuotaSnapshot, normalizeQuotaSummary } from './quota-snapshots.mjs';
 import { resolveWindowsDirs, spawnDetachedWorker } from './platform.mjs';
 import {
+  computeNaturalPauseMs,
+  computeSessionThresholds,
   evaluateQuotaAlert,
   loadGuardSettings,
   pickBestBackupAccount,
   readQuotaAlertSnapshot,
+  readQuotaRefreshTrigger,
   saveGuardSettings,
   writeQuotaAlertSnapshot,
 } from './quota-guard.mjs';
 import {
   appendSwitchLog,
   captureCurrentAccount,
+  ensureSecureDir,
   listPublicAccounts,
   maskEmail,
   normalizeEmail,
@@ -57,17 +60,6 @@ const ERROR_MESSAGES = Object.freeze({
   INVALID_ENCRYPTED_ENVELOPE: '密钥库格式校验失败，请检查数据目录完整性。',
   CORRUPT_VAULT: '密钥库已损坏或无法解密。',
   INVALID_KEY_FILE: '密钥文件损坏，无法解锁账号库。',
-  OAUTH_CLIENT_UNAVAILABLE: '未能从本机 Antigravity 解析到 OAuth 客户端配置。',
-  OAUTH_LISTEN_FAILED: '本地 OAuth 回调监听端口启动失败。',
-  MISSING_REFRESH_TOKEN: 'Google 未返回 refresh_token，请重试授权。',
-  OAUTH_EXCHANGE_FAILED: '向 Google 换取登录令牌失败，请确认本机代理可访问 Google。',
-  OAUTH_USERINFO_FAILED: '获取 Google 账号邮箱失败，请检查代理连通性。',
-  OAUTH_UNVERIFIED_EMAIL: '该 Google 账号邮箱未验证，无法导入。',
-  DISALLOWED_OAUTH_HOST: '拒绝访问非授权的远端主机。',
-  TOKEN_REFRESH_REVOKED: '该账号授权已失效，请重新「+ 添加账号」或切号登录。',
-  TOKEN_REFRESH_FAILED: '刷新该账号 OAuth 令牌失败，请检查代理连通性后重试。',
-  USAGE_FETCH_FAILED: '获取用量失败，请确认代理可访问 Google 后重试。',
-  USAGE_UNAVAILABLE: '该账号暂未返回用量配额数据。',
 });
 
 async function loadSidecarSdk() {
@@ -82,21 +74,23 @@ async function loadSidecarSdk() {
 
 function createRateLimiter(maxRequests, windowMs) {
   const hits = [];
-  return function allow() {
+  return function check() {
     const now = Date.now();
     while (hits.length > 0 && now - hits[0] >= windowMs) {
       hits.shift();
     }
     if (hits.length >= maxRequests) {
-      return false;
+      const retryMs = Math.max(1000, (hits[0] ?? now) + windowMs - now);
+      const retryAfterSec = Math.max(1, Math.ceil(retryMs / 1000));
+      return { allowed: false, retryAfterSec };
     }
     hits.push(now);
-    return true;
+    return { allowed: true, retryAfterSec: 0 };
   };
 }
 
-export async function fetchLsUserStatus(env = process.env) {
-  const parsed = await callLsRpc(env, 'GetUserStatus', { timeoutMs: 2000 });
+export async function fetchLsUserStatus(env = process.env, callLsRpcFn = callLsRpc) {
+  const parsed = await callLsRpcFn(env, 'GetUserStatus', { timeoutMs: 2000 });
   if (!parsed) {
     return { lsConnected: false, email: '', tierName: '' };
   }
@@ -147,45 +141,32 @@ export async function createApp(options = {}) {
 
   const uiToken = String(env.ANTIGRAVITY_SIDECAR_UI_TOKEN || '');
   const paths = resolvePaths(env, options.pathOverrides);
-  const oauthOpts = options.oauthOptions || {};
-  const cloudCode =
-    options.cloudCodeService ||
-    createCloudCodeService({
-      paths,
-      env,
-      ...(oauthOpts.loadClients ? { loadClients: oauthOpts.loadClients } : {}),
-      ...(oauthOpts.requestFn ? { requestFn: oauthOpts.requestFn } : {}),
-      ...(options.callLsRpc ? { callLsRpcFn: options.callLsRpc } : {}),
-      ...(options.cloudCodeOptions || {}),
-    });
-  const oauthManager = createOAuthManager({
-    paths,
-    env,
-    fetchProfile: (accessToken) => cloudCode.fetchProfileForAccessToken(accessToken),
-    ...oauthOpts,
-  });
-  const getUserStatus = options.getUserStatus || (() => fetchLsUserStatus(env));
-  const checkActiveWork = options.detectActiveWork || (() => detectActiveWork(env));
   const callLsRpcFn = options.callLsRpc || callLsRpc;
+  const quotaService = options.quotaService || createQuotaService({ paths, env, callLsRpcFn });
+  const getUserStatus = options.getUserStatus || (() => fetchLsUserStatus(env, callLsRpcFn));
+  let stateIdentity = null;
+  const checkActiveWork = options.detectActiveWork || (() => detectActiveWork(env));
   const spawnWorker =
     options.spawnWorker ||
     ((jobPath, dataDir = paths.dataDir) =>
       spawnDetachedWorker(WORKER_SCRIPT, jobPath, env, undefined, { dataDir }));
   const readLimit = createRateLimiter(options.readLimit ?? 60, 60_000);
   const writeLimit = createRateLimiter(options.writeLimit ?? 10, 60_000);
-  const remoteLimit = createRateLimiter(options.remoteLimit ?? 30, 60_000);
+  const settingsLimit = createRateLimiter(options.settingsLimit ?? 25, 60_000);
+  const usageLimit = createRateLimiter(options.usageLimit ?? options.remoteLimit ?? 30, 60_000);
   const switchLockMs = options.switchLockMs ?? 15_000;
-  const quotaPollIntervalMs = options.quotaPollIntervalMs ?? 60_000;
+  const minTriggerIntervalMs = options.triggerMinIntervalMs ?? 90_000;
+  const sessionThresholdState = { key: '', thresholds: null };
   let switchInProgress = false;
-  let quotaPollRunning = false;
-  let initialQuotaTimer = null;
-  let quotaPollTimer = null;
+  let pendingRefresh = Promise.resolve();
+  let triggerWatcher = null;
+  let triggerDebounce = null;
 
-  function jsonResponse(payload, status = 200) {
+  function jsonResponse(payload, status = 200, headers = {}) {
     return new Response(JSON.stringify(payload), {
       status,
       contentType: 'application/json; charset=utf-8',
-      headers: SECURITY_HEADERS,
+      headers: { ...SECURITY_HEADERS, ...headers },
     });
   }
 
@@ -200,19 +181,26 @@ export async function createApp(options = {}) {
 
   function mapError(err) {
     const code = err?.message || 'UNKNOWN';
-    if (ERROR_MESSAGES[code]) {
+    if (Object.hasOwn(ERROR_MESSAGES, code)) {
       return { status: 400, error: ERROR_MESSAGES[code] };
     }
-    console.error(`[switcher] internal error code=${code}`);
+    console.error('[switcher] internal error');
     return { status: 500, error: '操作失败，请检查本地日志或稍后重试。' };
   }
 
-  function requireSecurityGate(limiter) {
+  function requireSecurityGate(limiter, { scope = 'default' } = {}) {
     if (!uiToken) {
       return jsonResponse({ error: '未检测到安全访问令牌，操作已拒绝。' }, 403);
     }
-    if (!limiter()) {
-      return jsonResponse({ error: '请求过于频繁，请稍后再试。' }, 429);
+    const { allowed, retryAfterSec } = limiter();
+    if (!allowed) {
+      return jsonResponse({
+        code: 'RATE_LIMITED',
+        retryAfterSec,
+        error: scope === 'settings'
+          ? `高级设置保护中，请 ${retryAfterSec} 秒后再试。`
+          : `请求过于频繁，请 ${retryAfterSec} 秒后再试。`,
+      }, 429, { 'Retry-After': String(retryAfterSec) });
     }
     return null;
   }
@@ -229,10 +217,12 @@ export async function createApp(options = {}) {
         // Best-effort tier persistence; do not fail state read
       }
     }
+    const accounts = listPublicAccounts(paths, effectiveActiveEmail, { revealEmails, activeTierName });
+    stateIdentity = { tokenEmail: active.email, activeId: accounts.find(a => a.isActive)?.id };
     return {
       ok: true,
       active: sanitizeActiveState(active, lsUser, { revealEmail: revealEmails }),
-      accounts: listPublicAccounts(paths, effectiveActiveEmail, { revealEmails, activeTierName }),
+      accounts,
       logs: readRecentLogs(paths, 30),
       settings: loadGuardSettings(paths),
       quotaAlert: readQuotaAlertSnapshot(paths),
@@ -240,107 +230,84 @@ export async function createApp(options = {}) {
     };
   }
 
-  async function refreshQuotaAlertSnapshot({ forceRefresh = false } = {}) {
-    if (quotaPollRunning) return readQuotaAlertSnapshot(paths);
-    quotaPollRunning = true;
-    try {
+  function refreshQuotaAlertSnapshot({ forceRefresh = false, syncSource = 'manual' } = {}) {
+    pendingRefresh = pendingRefresh.then(async () => {
+      const lsUser = await getUserStatus();
+      if (!lsUser.lsConnected) return readQuotaAlertSnapshot(paths);
+      const activeEmail = normalizeEmail(lsUser.email) || readActiveToken(paths, env).email;
+      const accounts = listPublicAccounts(paths, activeEmail, { activeTierName: lsUser.tierName });
+      const activeAccount = accounts.find((acc) => acc.isActive);
+      const activeAccountId = activeAccount?.id || '';
       const settings = loadGuardSettings(paths);
-      const active = readActiveToken(paths, env);
-      const lsUser = await getUserStatus().catch(() => ({ lsConnected: false, email: '', tierName: '' }));
-      const effectiveActiveEmail = normalizeEmail((lsUser.lsConnected ? lsUser.email : '') || active.email);
-      const activeTierName = (lsUser.lsConnected ? lsUser.tierName : '') || '';
-      const accounts = listPublicAccounts(paths, effectiveActiveEmail, {
-        revealEmails: false,
-        activeTierName,
-      });
-      const activeAccount = accounts.find((a) => a.isActive) || null;
-
-      let summary = null;
-      if (activeAccount) {
-        try {
-          const res = await cloudCode.fetchAccountUsage({
-            id: activeAccount.id,
-            activeEmail: effectiveActiveEmail,
-            lsConnected: Boolean(lsUser.lsConnected),
-            forceRefresh,
-          });
-          summary = res?.usage || null;
-        } catch {
-          summary = null;
-        }
-      } else if (lsUser.lsConnected) {
-        try {
-          const lsRaw = await callLsRpcFn(env, 'RetrieveUserQuotaSummary', {
-            timeoutMs: 2500,
-            body: forceRefresh ? { forceRefresh: true } : {},
-          });
-          const parsed = normalizeQuotaSummary(lsRaw);
-          if (parsed && parsed.groups.length > 0) {
-            summary = parsed;
-          }
-        } catch {
-          summary = null;
-        }
-      }
-
-      if (!summary) {
-        return readQuotaAlertSnapshot(paths);
-      }
-
-      const evalResult = evaluateQuotaAlert(summary, settings);
-      let bestCandidate = null;
-      if (evalResult.triggered) {
-        const usageById = new Map();
-        const others = accounts.filter((a) => !a.isActive);
-        await Promise.allSettled(
-          others.map(async (acc) => {
-            const res = await cloudCode.fetchAccountUsage({
-              id: acc.id,
-              activeEmail: effectiveActiveEmail,
-              lsConnected: Boolean(lsUser.lsConnected),
-              forceRefresh: false,
-            });
-            if (res?.usage) {
-              usageById.set(acc.id, res.usage);
-            }
-          })
-        );
-        bestCandidate = pickBestBackupAccount(accounts, usageById, {
-          activeAccountId: activeAccount?.id || '',
-          activeEmail: effectiveActiveEmail,
-          thresholdPercent: settings.thresholdPercent,
+      const activeAccountKey = activeAccountId || activeEmail;
+      const key = JSON.stringify([activeAccountKey, settings.thresholdPercent, settings.dynamicThresholdEnabled]);
+      if (sessionThresholdState.key !== key) {
+        sessionThresholdState.key = key;
+        sessionThresholdState.thresholds = computeSessionThresholds(settings.thresholdPercent, {
+          dynamicEnabled: settings.dynamicThresholdEnabled,
         });
       }
 
+      let summary;
+      if (activeAccount) {
+        const live = await quotaService.fetchActiveQuota({
+          accountId: activeAccountId, tierName: activeAccount.tierName, forceRefresh, syncSource,
+        });
+        summary = live?.usage;
+      } else {
+        const raw = await callLsRpcFn(env, 'RetrieveUserQuotaSummary', {
+          timeoutMs: 2500, body: forceRefresh ? { forceRefresh: true } : {},
+        });
+        summary = normalizeQuotaSummary(raw);
+      }
+      if (!summary?.groups.length) return readQuotaAlertSnapshot(paths);
+
+      const alert = evaluateQuotaAlert(summary, settings, { sessionThresholds: sessionThresholdState.thresholds });
+      let bestCandidate = null;
+      if (alert.triggered) {
+        const usageById = quotaService.buildProjectedUsageMap(accounts, { activeAccountId, activeUsage: summary });
+        bestCandidate = pickBestBackupAccount(accounts, usageById, {
+          activeAccountId, activeEmail, thresholdPercent: settings.thresholdPercent,
+        });
+      }
       return writeQuotaAlertSnapshot(paths, {
-        activeAccountId: activeAccount?.id || '',
-        activeMaskedEmail: maskEmail(effectiveActiveEmail),
-        activeTierName: activeTierName || activeAccount?.tierName || '',
-        triggered: evalResult.triggered,
-        triggeredBuckets: evalResult.triggeredBuckets,
-        weeklyPercent: evalResult.weeklyPercent,
-        fiveHourPercent: evalResult.fiveHourPercent,
-        thresholdPercent: evalResult.thresholdPercent,
+        activeAccountId,
+        activeMaskedEmail: maskEmail(activeEmail),
+        activeTierName: lsUser.tierName || activeAccount?.tierName || '',
+        ...alert,
         settings,
         bestCandidate,
       });
-    } catch (err) {
-      console.error(`[switcher] quota alert refresh error=${err?.message || 'unknown'}`);
-      return null;
-    } finally {
-      quotaPollRunning = false;
-    }
+    }).catch(() => {
+      console.error('[switcher] quota alert refresh failed');
+      return readQuotaAlertSnapshot(paths);
+    });
+    return pendingRefresh;
   }
 
-  if (Number.isFinite(quotaPollIntervalMs) && quotaPollIntervalMs > 0) {
-    initialQuotaTimer = setTimeout(() => {
-      void refreshQuotaAlertSnapshot();
-    }, 3000);
-    initialQuotaTimer.unref?.();
-    quotaPollTimer = setInterval(() => {
-      void refreshQuotaAlertSnapshot();
-    }, quotaPollIntervalMs);
-    quotaPollTimer.unref?.();
+  if (options.watchTriggers !== false) {
+    try {
+      ensureSecureDir(paths.dataDir);
+      let lastRequestedAt = readQuotaRefreshTrigger(paths)?.requestedAt || '';
+      let lastRefreshMs = -Infinity;
+      triggerWatcher = watch(paths.dataDir, { persistent: false }, (_event, filename) => {
+        if (filename && filename !== 'quota-refresh-trigger.json') return;
+        clearTimeout(triggerDebounce);
+        triggerDebounce = setTimeout(() => {
+          const requestedAt = readQuotaRefreshTrigger(paths)?.requestedAt;
+          if (!requestedAt || requestedAt === lastRequestedAt) return;
+          lastRequestedAt = requestedAt;
+          const nowMs = Date.now();
+          if (nowMs - lastRefreshMs < minTriggerIntervalMs) return;
+          lastRefreshMs = nowMs;
+          void refreshQuotaAlertSnapshot({ forceRefresh: false, syncSource: 'hook_trigger' });
+        }, 200);
+        triggerDebounce.unref();
+      });
+      triggerWatcher.on('error', () => triggerWatcher.close());
+    } catch {
+      // Manual refresh remains available when the data directory cannot be watched.
+    }
   }
 
   app.page('/', () => assetResponse('index.html', 'text/html; charset=utf-8'));
@@ -375,6 +342,19 @@ export async function createApp(options = {}) {
           tierName: lsUser.lsConnected ? lsUser.tierName : '',
           env,
         });
+        if (lsUser.lsConnected) {
+          try {
+            // The credential file can still belong to the previous LS user.
+            const activeEmail = normalizeEmail(lsUser.email) || readActiveToken(paths, env).email;
+            if (listPublicAccounts(paths, activeEmail).some((acc) => acc.id === saved.id && acc.isActive)) {
+              await quotaService.fetchActiveQuota({
+                accountId: saved.id, tierName: lsUser.tierName, syncSource: 'capture', forceRefresh: true,
+              });
+            }
+          } catch {
+            // The account has already been saved.
+          }
+        }
         const state = await buildStatePayload({ revealEmails: Boolean(data?.revealEmails) });
         return jsonResponse({ ...state, message: `已保存当前账号（${saved.maskedEmail}）` });
       } catch (err) {
@@ -386,43 +366,27 @@ export async function createApp(options = {}) {
   );
 
   app.api(
-    '/api/accounts/sync-tiers',
-    async (data) => {
-      const blocked = requireSecurityGate(remoteLimit);
-      if (blocked) return blocked;
-      try {
-        const sync = await cloudCode.syncAccountTiers({ onlyMissing: Boolean(data?.onlyMissing) });
-        const state = await buildStatePayload({ revealEmails: Boolean(data?.revealEmails) });
-        return jsonResponse({ ...state, sync });
-      } catch (err) {
-        const mapped = mapError(err);
-        return jsonResponse({ error: mapped.error }, mapped.status);
-      }
-    },
-    'POST'
-  );
-
-  app.api(
     '/api/accounts/usage',
     async (data) => {
-      const blocked = requireSecurityGate(remoteLimit);
+      const blocked = requireSecurityGate(usageLimit);
       if (blocked) return blocked;
       try {
+        // A known inactive account can be projected without probing the LS.
+        // Recheck identity before attributing a live summary to any account.
         const active = readActiveToken(paths, env);
-        const lsUser = await getUserStatus();
-        const effectiveActiveEmail = normalizeEmail((lsUser.lsConnected ? lsUser.email : '') || active.email);
-        const result = await cloudCode.fetchAccountUsage({
+        const activeId = stateIdentity && stateIdentity.tokenEmail === active.email
+          ? stateIdentity.activeId
+          : active.email && listPublicAccounts(paths, active.email).find(a => a.isActive)?.id;
+        const lsUser = activeId && activeId === data?.id ? await getUserStatus() : null;
+        const effectiveActiveEmail = normalizeEmail((lsUser?.lsConnected ? lsUser.email : '') || active.email);
+        const result = await quotaService.getAccountUsage({
           id: data?.id,
           activeEmail: effectiveActiveEmail,
-          lsConnected: Boolean(lsUser.lsConnected),
+          tierName: lsUser?.tierName,
+          lsConnected: Boolean(lsUser?.lsConnected),
           forceRefresh: Boolean(data?.forceRefresh),
         });
-        return jsonResponse({
-          ok: true,
-          id: result.id,
-          usage: result.usage,
-          tierName: result.tierName,
-        });
+        return jsonResponse({ ok: true, ...result });
       } catch (err) {
         const mapped = mapError(err);
         return jsonResponse({ error: mapped.error }, mapped.status);
@@ -458,7 +422,8 @@ export async function createApp(options = {}) {
       if (blocked) return blocked;
       try {
         removeAccount(paths, { id: data?.id });
-        cloudCode.invalidateCache?.(data?.id);
+        quotaService.invalidateCache();
+        deleteQuotaSnapshot(paths, data?.id);
         const state = await buildStatePayload({ revealEmails: Boolean(data?.revealEmails) });
         return jsonResponse({ ...state, message: '已从本机密钥库移除该账号' });
       } catch (err) {
@@ -475,29 +440,40 @@ export async function createApp(options = {}) {
     if (switchInProgress) {
       return jsonResponse({ error: '正在执行切号流程，请等待窗口重启完成。' }, 409);
     }
-    if (!force) {
-      const activeWork = await checkActiveWork();
-      if (activeWork?.busy) {
-        return jsonResponse(
-          {
-            ok: false,
-            code: 'ACTIVE_WORK_RUNNING',
-            error: '检测到当前仍有对话或子进程正在运行，已暂停切换，请先结束后重试。',
-            activeWork,
-          },
-          409
-        );
-      }
-    } else {
-      try {
-        appendSwitchLog(paths, `FORCE_SWITCH_REQUESTED mode=${mode}`);
-      } catch {
-        // Ignore audit log error before switch
-      }
-    }
     switchInProgress = true;
     try {
+      if (!force) {
+        const activeWork = await checkActiveWork();
+        if (activeWork?.busy) {
+          switchInProgress = false;
+          return jsonResponse(
+            {
+              ok: false,
+              code: 'ACTIVE_WORK_RUNNING',
+              error: '检测到当前仍有对话或子进程正在运行，已暂停切换，请先结束后重试。',
+              activeWork,
+            },
+            409
+          );
+        }
+      } else {
+        try {
+          appendSwitchLog(paths, `FORCE_SWITCH_REQUESTED mode=${mode}`);
+        } catch {
+          // Ignore audit log error before switch
+        }
+      }
       const lsUser = await getUserStatus();
+      if (lsUser.lsConnected) {
+        try {
+          const activeEmail = normalizeEmail(lsUser.email) || readActiveToken(paths, env).email;
+          const activeAccount = listPublicAccounts(paths, activeEmail).find((acc) => acc.isActive);
+          await quotaService.capturePreSwitchSnapshot({ accountId: activeAccount?.id || '', tierName: lsUser.tierName });
+        } catch {
+          // A failed quota capture must not block switching.
+        }
+      }
+      const settings = loadGuardSettings(paths);
       const winDirs = resolveWindowsDirs(env);
       const jobContext = {
         ...(winDirs.appData ? { appData: winDirs.appData } : {}),
@@ -516,8 +492,12 @@ export async function createApp(options = {}) {
         fallbackEmail: lsUser.email,
         env,
         context: jobContext,
+        syncOnboarding: Boolean(settings.skipOnboardingPrompt),
+        relaunchPauseMs: computeNaturalPauseMs({ enabled: settings.naturalPauseEnabled }),
       });
       await spawnWorker(job.jobPath, paths.dataDir);
+      stateIdentity = null;
+      quotaService.invalidateCache();
       const timer = setTimeout(() => {
         switchInProgress = false;
       }, switchLockMs);
@@ -543,63 +523,9 @@ export async function createApp(options = {}) {
   app.api('/api/accounts/new-login', (data) => triggerSwitch('new-login', '', { force: Boolean(data?.force) }), 'POST');
 
   app.api(
-    '/api/oauth/start',
-    async (data) => {
-      const blocked = requireSecurityGate(writeLimit);
-      if (blocked) return blocked;
-      try {
-        const oauth = await oauthManager.start({
-          label: typeof data?.label === 'string' ? data.label : '',
-        });
-        return jsonResponse({ ok: true, oauth });
-      } catch (err) {
-        const mapped = mapError(err);
-        return jsonResponse({ error: mapped.error }, mapped.status);
-      }
-    },
-    'POST'
-  );
-
-  app.api(
-    '/api/oauth/status',
-    async (data) => {
-      const blocked = requireSecurityGate(readLimit);
-      if (blocked) return blocked;
-      try {
-        const oauth = oauthManager.getStatus();
-        if (oauth.status === 'succeeded' || oauth.status === 'failed' || oauth.status === 'expired') {
-          const state = await buildStatePayload({ revealEmails: Boolean(data?.revealEmails) });
-          return jsonResponse({ ...state, oauth });
-        }
-        return jsonResponse({ ok: true, oauth });
-      } catch (err) {
-        const mapped = mapError(err);
-        return jsonResponse({ error: mapped.error }, mapped.status);
-      }
-    },
-    'POST'
-  );
-
-  app.api(
-    '/api/oauth/cancel',
-    async () => {
-      const blocked = requireSecurityGate(writeLimit);
-      if (blocked) return blocked;
-      try {
-        const oauth = oauthManager.cancel();
-        return jsonResponse({ ok: true, oauth });
-      } catch (err) {
-        const mapped = mapError(err);
-        return jsonResponse({ error: mapped.error }, mapped.status);
-      }
-    },
-    'POST'
-  );
-
-  app.api(
     '/api/settings/update',
     async (data) => {
-      const blocked = requireSecurityGate(writeLimit);
+      const blocked = requireSecurityGate(settingsLimit, { scope: 'settings' });
       if (blocked) return blocked;
       try {
         const nextSettings = saveGuardSettings(paths, data && typeof data === 'object' ? data : {});
@@ -624,15 +550,9 @@ export async function createApp(options = {}) {
     refreshQuotaAlert: refreshQuotaAlertSnapshot,
     start: () => app.run(),
     close: async () => {
-      if (initialQuotaTimer) {
-        clearTimeout(initialQuotaTimer);
-        initialQuotaTimer = null;
-      }
-      if (quotaPollTimer) {
-        clearInterval(quotaPollTimer);
-        quotaPollTimer = null;
-      }
-      oauthManager.dispose();
+      triggerWatcher?.close();
+      clearTimeout(triggerDebounce);
+      await pendingRefresh;
       await app.close();
     },
   };

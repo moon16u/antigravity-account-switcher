@@ -7,6 +7,13 @@
         "command": "node ./scripts/quota-hook.mjs || \"%APPDATA%\\Antigravity\\bin\\agy-node.cmd\" ./scripts/quota-hook.mjs",
         "timeout": 5
       }
+    ],
+    "PostInvocation": [
+      {
+        "type": "command",
+        "command": "node ./scripts/quota-hook.mjs || \"%APPDATA%\\Antigravity\\bin\\agy-node.cmd\" ./scripts/quota-hook.mjs",
+        "timeout": 3
+      }
     ]
   }
 }

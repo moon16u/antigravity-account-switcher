@@ -2,15 +2,17 @@ import { realpathSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { callLsRpc, detectActiveWork } from '../sidecars/switcher/active-work.mjs';
-import { createCloudCodeService } from '../sidecars/switcher/cloudcode.mjs';
 import { resolveWindowsDirs, spawnDetachedWorker } from '../sidecars/switcher/platform.mjs';
 import {
+  computeNaturalPauseMs,
+  computeSessionThresholds,
   discoverLiveHub,
   evaluateQuotaAlert,
   loadGuardSettings,
   pickBestBackupAccount,
   readQuotaAlertSnapshot,
 } from '../sidecars/switcher/quota-guard.mjs';
+import { createQuotaService } from '../sidecars/switcher/quota-snapshots.mjs';
 import {
   appendSwitchLog,
   CONVERSATION_ID_RE,
@@ -27,7 +29,7 @@ import {
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const WORKER_SCRIPT = join(__dirname, '..', 'sidecars', 'switcher', 'switcher-worker.mjs');
 const MAX_RPC_BUFFER_BYTES = 2 * 1024 * 1024;
-const SERVER_VERSION = '0.3.0';
+const SERVER_VERSION = '0.4.0';
 
 export const MCP_TOOLS = Object.freeze([
   {
@@ -53,7 +55,7 @@ export const MCP_TOOLS = Object.freeze([
   {
     name: 'get_quota',
     description:
-      'Fetch real-time Gemini & 3P quota summary for the active account, a specific saved account, or all saved accounts, plus threshold alert evaluation and best healthy backup candidate.',
+      'Query real-time Gemini & 3P quota for the active account through the live local language_server RPC, and read local cached snapshots with reset-time projection for inactive accounts (zero remote/internal API calls). Returns threshold alert evaluation and, with includeAll, the healthiest local backup candidate.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -63,11 +65,11 @@ export const MCP_TOOLS = Object.freeze([
         },
         includeAll: {
           type: 'boolean',
-          description: 'Set true to fetch quota summaries across all saved accounts and pick the best backup.',
+          description: 'Set true to read quota summaries across all saved accounts and pick the best backup.',
         },
         forceRefresh: {
           type: 'boolean',
-          description: 'Set true to bypass the 30s quota cache.',
+          description: 'Set true to bypass the 30s live quota cache for the active account.',
         },
       },
       additionalProperties: false,
@@ -76,7 +78,7 @@ export const MCP_TOOLS = Object.freeze([
   {
     name: 'switch_account',
     description:
-      'Safely switch the active Antigravity account and restart the desktop app after a short delay (default 3s). Checks active conversations/tasks/terminals first, excluding the caller conversationId when provided.',
+      'Safely switch the active Antigravity account and restart the desktop app after a short delay (default 3s). Checks active conversations/tasks/terminals first, excluding the caller conversationId when provided. With pickBest: true, picks the healthiest backup from local quota snapshots/reset projection (never remote internal APIs) and respects guard settings, including opt-in onboarding sync and natural pause.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -86,7 +88,8 @@ export const MCP_TOOLS = Object.freeze([
         },
         pickBest: {
           type: 'boolean',
-          description: 'When true and accountId is omitted, automatically picks the backup account with the highest remaining Gemini quota above threshold.',
+          description:
+            'When true and accountId is omitted, automatically picks the healthiest backup from local quota snapshots and reset-time projection, falling back to the least-recently-used unsnapshotted backup.',
         },
         conversationId: {
           type: 'string',
@@ -122,11 +125,27 @@ function toolResult(payload, isError = false) {
   };
 }
 
+function attachUsageMeta(candidate, usageById) {
+  if (!candidate) return null;
+  const meta = usageById instanceof Map ? usageById.get(candidate.id) : null;
+  if (!meta) return candidate;
+  return {
+    ...candidate,
+    source: meta.source || 'none',
+    capturedAt: meta.capturedAt ?? null,
+    isStale: Boolean(meta.isStale),
+    estimatedAnyReset: Boolean(meta.estimatedAnyReset),
+    hasSnapshot: Boolean(meta.hasSnapshot),
+  };
+}
+
 export function createMcpHandlers(options = {}) {
   const env = { ...process.env, ...(options.env || {}) };
   const paths = resolvePaths(env, options.pathOverrides);
   const discoverHubFn = options.discoverLiveHub || discoverLiveHub;
   const detectActiveWorkFn = options.detectActiveWork || detectActiveWork;
+  let quotaContextKey = '';
+  let quotaService = options.quotaService;
   const spawnWorker =
     options.spawnWorker ||
     ((jobPath, dataDir = paths.dataDir, workerEnv = env) =>
@@ -152,16 +171,17 @@ export function createMcpHandlers(options = {}) {
       activeTierName: lsConnected ? lsTierName : '',
     });
     const activeAccount = accounts.find((a) => a.isActive) || null;
-    const cloudCode =
-      options.cloudCodeService ||
-      createCloudCodeService({
+    const contextKey = JSON.stringify([liveHub?.lsAddress, liveHub?.csrfToken, liveHub?.pid, effectiveActiveEmail]);
+    if (!options.quotaService && contextKey !== quotaContextKey) {
+      quotaService?.invalidateCache();
+      quotaContextKey = contextKey;
+      quotaService = createQuotaService({
         paths,
         env: lsEnv,
         callLsRpcFn: options.callLsRpc || callLsRpc,
-        ...(options.oauthOptions?.loadClients ? { loadClients: options.oauthOptions.loadClients } : {}),
-        ...(options.oauthOptions?.requestFn ? { requestFn: options.oauthOptions.requestFn } : {}),
-        ...(options.cloudCodeOptions || {}),
+        ...(options.quotaServiceOptions || {}),
       });
+    }
 
     return {
       liveHub,
@@ -173,7 +193,7 @@ export function createMcpHandlers(options = {}) {
       effectiveActiveEmail,
       accounts,
       activeAccount,
-      cloudCode,
+      quotaService,
     };
   }
 
@@ -239,25 +259,39 @@ export function createMcpHandlers(options = {}) {
         );
       }
 
+      const sessionThresholds = computeSessionThresholds(settings.thresholdPercent, {
+        dynamicEnabled: settings.dynamicThresholdEnabled !== false,
+      });
+
       const usageById = new Map();
       const results = [];
       for (const acc of targets) {
         try {
-          const res = await ctx.cloudCode.fetchAccountUsage({
-            id: acc.id,
-            activeEmail: ctx.effectiveActiveEmail,
-            lsConnected: ctx.lsConnected,
-            forceRefresh,
-          });
-          usageById.set(acc.id, res.usage);
+          const res =
+            (await ctx.quotaService.getAccountUsage({
+              id: acc.id,
+              activeAccountId: ctx.activeAccount?.id || '',
+              activeEmail: ctx.effectiveActiveEmail,
+              lsConnected: ctx.lsConnected,
+              tierName: acc.tierName,
+              forceRefresh,
+              syncSource: 'mcp',
+            })) || {};
+          const usage = res.usage ?? null;
+          usageById.set(acc.id, { ...res, usage });
           results.push({
             id: acc.id,
             maskedEmail: acc.maskedEmail,
             label: acc.label,
             tierName: res.tierName || acc.tierName || '',
             isActive: acc.isActive,
-            alert: evaluateQuotaAlert(res.usage, settings),
-            usage: res.usage,
+            alert: usage ? evaluateQuotaAlert(usage, settings, { sessionThresholds }) : null,
+            usage,
+            source: res.source || 'none',
+            capturedAt: res.capturedAt ?? null,
+            isStale: Boolean(res.isStale),
+            estimatedAnyReset: Boolean(res.estimatedAnyReset),
+            hasSnapshot: Boolean(res.hasSnapshot),
           });
         } catch (err) {
           results.push({
@@ -267,21 +301,32 @@ export function createMcpHandlers(options = {}) {
             tierName: acc.tierName || '',
             isActive: acc.isActive,
             error: err?.message || 'USAGE_FETCH_FAILED',
+            alert: null,
+            usage: null,
+            source: 'none',
+            capturedAt: null,
+            isStale: false,
+            estimatedAnyReset: false,
+            hasSnapshot: false,
           });
         }
       }
 
       const bestCandidate = includeAll
-        ? pickBestBackupAccount(ctx.accounts, usageById, {
-            activeAccountId: ctx.activeAccount?.id || '',
-            activeEmail: ctx.effectiveActiveEmail,
-            thresholdPercent: settings.thresholdPercent,
-          })
+        ? attachUsageMeta(
+            pickBestBackupAccount(ctx.accounts, usageById, {
+              activeAccountId: ctx.activeAccount?.id || '',
+              activeEmail: ctx.effectiveActiveEmail,
+              thresholdPercent: settings.thresholdPercent,
+            }),
+            usageById
+          )
         : null;
 
       return toolResult({
         ok: true,
         thresholdPercent: settings.thresholdPercent,
+        sessionThresholds,
         accounts: results,
         ...(includeAll ? { bestCandidate } : {}),
       });
@@ -293,6 +338,8 @@ export function createMcpHandlers(options = {}) {
       const cid = typeof args.conversationId === 'string' ? args.conversationId.trim() : '';
       const force = Boolean(args.force);
       let targetAccountId = typeof args.accountId === 'string' ? args.accountId.trim() : '';
+      let selectionSource = '';
+      let selectionReason = '';
 
       if (targetAccountId && !UUID_RE.test(targetAccountId)) {
         return toolResult({ ok: false, code: 'INVALID_ACCOUNT_ID', message: 'Invalid accountId UUID.' }, true);
@@ -309,43 +356,57 @@ export function createMcpHandlers(options = {}) {
             true
           );
         }
-        const candidates = ctx.accounts.filter((a) => !a.isActive);
+        const activeAccountId = ctx.activeAccount?.id || '';
+        const candidates = ctx.accounts.filter((a) => !a.isActive && (!activeAccountId || a.id !== activeAccountId));
         if (candidates.length === 0) {
           return toolResult(
             { ok: false, code: 'NO_BACKUP_ACCOUNT', message: 'No saved backup accounts available.' },
             true
           );
         }
-        const usageById = new Map();
-        await Promise.allSettled(
-          candidates.map(async (acc) => {
-            const res = await ctx.cloudCode.fetchAccountUsage({
-              id: acc.id,
-              activeEmail: ctx.effectiveActiveEmail,
-              lsConnected: ctx.lsConnected,
-              forceRefresh: false,
-            });
-            if (res?.usage) {
-              usageById.set(acc.id, res.usage);
-            }
-          })
-        );
+
+        // Local-only selection: read cached/projected snapshots. This path never
+        // issues remote HTTP or OAuth token-refresh calls.
+        const usageById = ctx.quotaService.buildProjectedUsageMap(ctx.accounts, {
+          activeAccountId,
+        });
         const best = pickBestBackupAccount(ctx.accounts, usageById, {
-          activeAccountId: ctx.activeAccount?.id || '',
+          activeAccountId,
           activeEmail: ctx.effectiveActiveEmail,
           thresholdPercent: settings.thresholdPercent,
         });
-        if (!best) {
-          return toolResult(
-            {
-              ok: false,
-              code: 'NO_HEALTHY_BACKUP_ACCOUNT',
-              message: `No backup account has remaining Gemini quota above ${settings.thresholdPercent}%.`,
-            },
-            true
-          );
+
+        if (best) {
+          targetAccountId = best.id;
+          selectionSource = 'snapshot';
+        } else {
+          // No snapshotted backup is healthy yet. Rather than failing first-time
+          // users, fall back to the least-recently-used backup without a usable
+          // snapshot. Only fail when every backup has a snapshot below threshold.
+          const unsnapshotted = candidates.filter((acc) => {
+            const meta = usageById instanceof Map ? usageById.get(acc.id) : usageById?.[acc.id];
+            return !meta || !meta.usage || meta.source === 'none';
+          });
+          if (unsnapshotted.length === 0) {
+            return toolResult(
+              {
+                ok: false,
+                code: 'NO_HEALTHY_BACKUP_ACCOUNT',
+                message: `No backup account has remaining Gemini quota above ${settings.thresholdPercent}%.`,
+              },
+              true
+            );
+          }
+          unsnapshotted.sort((a, b) => {
+            const aMs = Date.parse(String(a.lastUsedAt || '')) || 0;
+            const bMs = Date.parse(String(b.lastUsedAt || '')) || 0;
+            return aMs - bMs;
+          });
+          targetAccountId = unsnapshotted[0].id;
+          selectionSource = 'unsnapshotted-fallback';
+          selectionReason =
+            'No snapshotted backup has quota above threshold; selected the least-recently-used backup without a local snapshot.';
         }
-        targetAccountId = best.id;
       }
 
       if (!ctx.accounts.some((a) => a.id === targetAccountId)) {
@@ -420,6 +481,17 @@ export function createMcpHandlers(options = {}) {
           }
         : null;
 
+      // Snapshot the outgoing account's live quota before its token is replaced.
+      // Best-effort: a failed snapshot must never block the switch itself.
+      try {
+        await ctx.quotaService.capturePreSwitchSnapshot({
+          accountId: ctx.activeAccount?.id || '',
+          tierName: ctx.lsTierName,
+        });
+      } catch {
+        // Ignore snapshot capture failures
+      }
+
       const job = prepareSwitchJob(paths, {
         mode: 'switch',
         accountId: targetAccountId,
@@ -429,15 +501,20 @@ export function createMcpHandlers(options = {}) {
         delayMs,
         resume,
         waitConversationIdle,
+        syncOnboarding: Boolean(settings.skipOnboardingPrompt),
+        relaunchPauseMs: computeNaturalPauseMs({ enabled: settings.naturalPauseEnabled }),
       });
 
       await spawnWorker(job.jobPath, paths.dataDir, ctx.lsEnv);
+      ctx.quotaService.invalidateCache?.();
 
       return toolResult({
         ok: true,
         switching: true,
         targetAccountId,
         targetMaskedEmail: job.targetMaskedEmail || maskEmail(ctx.accounts.find((a) => a.id === targetAccountId)?.maskedEmail || ''),
+        ...(selectionSource ? { selectionSource } : {}),
+        ...(selectionReason ? { selectionReason } : {}),
         delaySec: settings.switchDelaySec,
         autoResumeScheduled: Boolean(resume),
         message: waitConversationIdle

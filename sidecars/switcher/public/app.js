@@ -1,10 +1,19 @@
 (function () {
   'use strict';
 
-  const GOOGLE_AUTH_URL_RE = /^https:\/\/accounts\.google\.com\/o\/oauth2\/v2\/auth\?/;
   const LANG_STORAGE_KEY = 'ag-switcher-lang';
   const SVG_NS = 'http://www.w3.org/2000/svg';
   const USAGE_EXPAND_REFRESH_MS = 10_000;
+  const GUARD_TOGGLES = [
+    ['guard-alert-enabled', 'alertEnabled'],
+    ['guard-watch-weekly', 'watchWeekly'],
+    ['guard-watch-5h', 'watch5h'],
+    ['guard-dynamic-threshold', 'dynamicThresholdEnabled', true],
+    ['guard-natural-pause', 'naturalPauseEnabled', true],
+    ['guard-auto-switch', 'autoSwitchEnabled'],
+    ['guard-auto-resume', 'autoResumeEnabled'],
+    ['guard-skip-onboarding', 'skipOnboardingPrompt'],
+  ];
 
   const I18N = {
     zh: {
@@ -18,22 +27,13 @@
       refreshTitle: '刷新状态',
       savedAccounts: '已保存账号',
       addAccountBtn: '+ 添加账号',
-      collapseAddBtn: '收起添加',
-      collapseBtn: '收起',
-      oauthLabelPlaceholder: '新账号备注名（可选，如 备用1）',
-      oauthStartBtn: '浏览器授权添加',
-      oauthPendingMsg:
-        '请在弹出的浏览器中登录要添加的 Google 账号（无需退出当前 Antigravity）。若需登录另一个账号，可复制下方链接到无痕窗口或其它浏览器配置文件打开。',
-      oauthExchangingMsg: '已收到 Google 回调，正在换取并加密保存凭证…',
-      openAuthPage: '打开授权页',
-      copyAuthUrl: '复制授权链接',
-      cancelOAuth: '取消授权',
+      captureLabel: '当前账号备注名',
       captureLabelPlaceholder: '给当前账号起个备注名（可选，如 主号）',
       captureBtn: '保存当前账号',
       unsavedPromptFile: '检测到当前登录账号（{email}{tier}）尚未保存到切换列表，可输入备注后保存：',
-      unsavedPromptKeyring: '当前已登录 {email}{tier}，请点击右上方「+ 添加账号」纳入切换列表。',
-      corruptLocalCred: '检测到本地 OAuth 凭证格式异常，可通过上方「+ 添加账号」重新授权替换。',
-      emptyAccounts: '暂无已保存账号。可点击右上方「+ 添加账号」免退出授权添加。',
+      unsavedPromptKeyring: '当前已登录 {email}{tier}。点击「+ 添加账号」重启 Antigravity，通过官方原生 Google 登录切换或添加账号。',
+      corruptLocalCred: '检测到本地登录凭证格式异常。点击「+ 添加账号」通过官方原生 Google 登录重新登录。',
+      emptyAccounts: '暂无已保存账号。点击「+ 添加账号」通过官方原生 Google 登录添加。',
       emptyAccountsWithUnsaved: '可在上方保存当前账号，或点击右上方「+ 添加账号」添加其它账号。',
       unnamedAccount: '未命名账号',
       activeBadge: '当前使用',
@@ -45,6 +45,10 @@
       usageHeading: '用量',
       usageLoading: '正在获取用量…',
       usageEmpty: '暂无配额数据',
+      usageLive: '实时',
+      usageSnapshot: '本地快照',
+      usageStaleSnapshot: '快照已超过 24 小时 · 切入后自动校准',
+      usageNoSnapshot: '暂无本地快照，切换到该账号后将自动采集用量',
       usageRefreshTitle: '刷新用量',
       usageRetry: '重试',
       usageWeeklyLimit: '每周限额',
@@ -55,6 +59,8 @@
       usageDisabled: '不可用',
       usageResetsSoon: '即将重置',
       usageResetsIn: '{time}后重置',
+      usageEstimatedReset: '预计已重置',
+      usageEstimatedFull: '预计 100%',
       errUsageFailed: '获取用量失败',
       renamePlaceholder: '输入新别名（留空则清除别名）',
       saveBtn: '保存',
@@ -74,20 +80,29 @@
       kindProcess: '运行中子进程',
       kindDefault: '运行中任务',
       unnamedTask: '未命名任务',
-      guardSummary: 'Agent 自动切号与低额度提醒',
-      guardAlertLabel: '启用低额度实时提醒',
+      toolsLabel: '高级工具',
+      guardSummary: '高级设置',
+      guardAlertLabel: '低额度实时提醒',
+      guardAlertTip: '低风险：仅在对话进行时检查额度，空闲时不发起请求。',
       guardWatchWeeklyLabel: '监控 Gemini 周额度',
       guardWatch5hLabel: '监控 Gemini 5 小时额度',
-      guardThresholdLabel: '触发阈值（剩余百分比 ≤）',
-      guardAutoSwitchLabel: '允许 Agent 低额度自动切号（仅在无其他并发会话/任务时）',
-      guardAutoResumeLabel: '切号重启后自动唤醒当前会话续跑',
-      guardSaveBtn: '保存设置',
-      fallbackSummary: '原生登录（备用）',
-      fallbackDesc:
-        '浏览器授权受阻时可使用此方式：备份当前账号并退出桌面应用，以未登录状态重开窗口进行原生登录。',
-      newLoginBtn: '退出并走原生登录',
-      newLoginConfirmMsg: '将自动备份当前账号并重启 Antigravity，随后清除当前登录态进入官方 Google 登录。',
-      newLoginConfirmBtn: '确认退出并登录新号',
+      guardThresholdLabel: '触发阈值',
+      guardThresholdTip: '剩余额度不高于此比例时触发提醒；开启动态阈值区间时作为浮动基准。',
+      guardDynamicThresholdLabel: '动态阈值区间',
+      guardDynamicThresholdTip: '低风险：每次会话在基准阈值附近自动浮动，先提示收尾再进入切号，减少固定阈值特征。',
+      guardNaturalPauseLabel: '切号自然停顿',
+      guardNaturalPauseTip: '低风险：关闭桌面端应用并更新登录态后，随机停顿 3–8 秒再重新启动。',
+      guardAutoSwitchLabel: 'Agent 自动切号',
+      guardAutoSwitchTip: '中风险：仅在无其他并发会话或任务时自动切号；高频无人值守切换会增加账号关联风险，建议按需开启。',
+      guardAutoResumeLabel: '切号后自动续跑',
+      guardAutoResumeTip: '中风险：桌面端应用重启就绪后自动唤醒当前会话继续任务，建议配合 Agent 自动切号使用。',
+      guardSkipOnboardingLabel: '跳过重复条款弹窗',
+      guardSkipOnboardingTip: '低风险：切号时同步更新本地引导记录，减少重复弹出的条款确认窗；关闭则不改动应用配置。',
+      guardInfoLabel: '设置说明',
+      guardOn: '开启',
+      guardOff: '关闭',
+      newLoginConfirmMsg: '将自动备份当前账号并重启 Antigravity，以未登录状态进入官方原生 Google 登录；登录完成后再点击「保存当前账号」纳入列表。',
+      newLoginConfirmBtn: '确认并重启',
       logsSummary: '最近切换日志',
       noLogs: '暂无记录',
       footerNote: 'AES-256-GCM 本地加密保存 · 点击「切换」即可自动备份并重启切换账号',
@@ -95,16 +110,13 @@
       errReadState: '读取账号状态失败',
       errActionFailed: '操作失败',
       errSwitchFailed: '切号失败',
-      errOAuthIncomplete: '浏览器授权未完成，请重试。',
-      noticeOAuthAdded: '已通过浏览器授权添加账号（{email}）',
-      noticeBrowserOpened: '已唤起浏览器授权页，请在浏览器完成登录…',
-      noticeBrowserFallback: '请点击「打开授权页」或复制授权链接到浏览器完成登录…',
-      noticeCopied: '已复制授权链接，可粘贴到无痕窗口或其它浏览器配置文件中打开。',
-      noticeCopyRestricted: '自动复制受限，已选中上方链接框，请按 Ctrl+C 复制。',
-      noticeOAuthCancelled: '已取消浏览器授权。',
+      noticeNewLoginRestarting: '正在重启 Antigravity 以进入官方原生 Google 登录…',
       noticeRefreshed: '已刷新账号状态与用量',
       noticeRefreshedLocal: '已刷新本地账号状态',
-      noticeGuardSaved: '已更新 Agent 守护与切号设置',
+      noticeGuardSaved: '已更新高级设置',
+      noticeGuardCooldown: '高级设置保护中，请 {sec} 秒后再试',
+      noticeGuardCooldownFallback: '高级设置保护中，请稍后再试',
+      errGuardSave: '无法更新高级设置',
     },
     en: {
       pageTitle: 'Account Switcher',
@@ -117,22 +129,13 @@
       refreshTitle: 'Refresh status',
       savedAccounts: 'Saved Accounts',
       addAccountBtn: '+ Add Account',
-      collapseAddBtn: 'Close',
-      collapseBtn: 'Hide',
-      oauthLabelPlaceholder: 'Label (optional, e.g. Work)',
-      oauthStartBtn: 'Authorize in Browser',
-      oauthPendingMsg:
-        'Sign in with your Google account in the opened browser (no need to quit Antigravity). Or copy the URL below into an incognito window or another browser profile.',
-      oauthExchangingMsg: 'Callback received, encrypting & saving credentials…',
-      openAuthPage: 'Open Auth Page',
-      copyAuthUrl: 'Copy URL',
-      cancelOAuth: 'Cancel',
+      captureLabel: 'Label for current account',
       captureLabelPlaceholder: 'Label for current account (optional)',
       captureBtn: 'Save Account',
       unsavedPromptFile: 'Current signed-in account ({email}{tier}) is not in your saved list yet:',
-      unsavedPromptKeyring: 'Signed in as {email}{tier}. Click "+ Add Account" above to add it for switching.',
-      corruptLocalCred: 'Local OAuth credential format is invalid. Use "+ Add Account" to re-authorize and replace it.',
-      emptyAccounts: 'No saved accounts yet. Click "+ Add Account" above to authorize without signing out.',
+      unsavedPromptKeyring: 'Signed in as {email}{tier}. Click "+ Add Account" to restart Antigravity and switch or add an account through official native Google sign-in.',
+      corruptLocalCred: 'Local sign-in credentials are invalid. Click "+ Add Account" to sign in again through official native Google sign-in.',
+      emptyAccounts: 'No saved accounts yet. Click "+ Add Account" to add one through official native Google sign-in.',
       emptyAccountsWithUnsaved: 'Save the active account above, or click "+ Add Account" to add another.',
       unnamedAccount: 'Unnamed Account',
       activeBadge: 'Active',
@@ -144,6 +147,10 @@
       usageHeading: 'Usage',
       usageLoading: 'Loading usage…',
       usageEmpty: 'No usage data',
+      usageLive: 'Live',
+      usageSnapshot: 'Snapshot',
+      usageStaleSnapshot: 'Snapshot >24h old · syncs on switch',
+      usageNoSnapshot: 'No local snapshot yet — captured automatically after switching to this account',
       usageRefreshTitle: 'Refresh usage',
       usageRetry: 'Retry',
       usageWeeklyLimit: 'Weekly limit',
@@ -154,6 +161,8 @@
       usageDisabled: 'Unavailable',
       usageResetsSoon: 'Resets soon',
       usageResetsIn: 'Resets in {time}',
+      usageEstimatedReset: 'Est. reset',
+      usageEstimatedFull: 'Est. 100%',
       errUsageFailed: 'Failed to load usage',
       renamePlaceholder: 'New label (empty clears label)',
       saveBtn: 'Save',
@@ -173,19 +182,28 @@
       kindProcess: 'Child Process',
       kindDefault: 'Active Task',
       unnamedTask: 'Unnamed Task',
-      guardSummary: 'Agent Auto-Switch & Quota Alert',
-      guardAlertLabel: 'Enable live low-quota alerts',
-      guardWatchWeeklyLabel: 'Watch Gemini Weekly quota',
-      guardWatch5hLabel: 'Watch Gemini 5-Hour quota',
-      guardThresholdLabel: 'Alert threshold (remaining ≤)',
-      guardAutoSwitchLabel: 'Allow Agent auto-switch on low quota (only when no other sessions/tasks are busy)',
-      guardAutoResumeLabel: 'Auto-resume current conversation after restart',
-      guardSaveBtn: 'Save Settings',
-      fallbackSummary: 'Native Sign-in (Fallback)',
-      fallbackDesc:
-        'If browser authorization is blocked, use this option: back up the current account, quit the desktop app, and reopen signed out for native Google sign-in.',
-      newLoginBtn: 'Sign Out & Re-login',
-      newLoginConfirmMsg: 'Will back up current account and restart Antigravity without active credentials for native sign-in.',
+      toolsLabel: 'Advanced tools',
+      guardSummary: 'Advanced Settings',
+      guardAlertLabel: 'Live Low-Quota Alerts',
+      guardAlertTip: 'Low risk: Checks quota only during active conversations, with zero idle requests.',
+      guardWatchWeeklyLabel: 'Watch Gemini Weekly Quota',
+      guardWatch5hLabel: 'Watch Gemini 5-Hour Quota',
+      guardThresholdLabel: 'Alert Threshold',
+      guardThresholdTip: 'Triggers alerts when remaining quota is at or below this level, or serves as the base for dynamic thresholds.',
+      guardDynamicThresholdLabel: 'Dynamic Threshold Range',
+      guardDynamicThresholdTip: 'Low risk: Varies soft wrap-up and switch thresholds slightly per session around the base value.',
+      guardNaturalPauseLabel: 'Natural Relaunch Pause',
+      guardNaturalPauseTip: 'Low risk: Waits a random 3–8 seconds after closing the desktop app before relaunching.',
+      guardAutoSwitchLabel: 'Agent Auto-Switch',
+      guardAutoSwitchTip: 'Medium risk: Switches automatically only when no other sessions or tasks are running; frequent unattended switching may increase account-linkage risk.',
+      guardAutoResumeLabel: 'Auto-Resume After Switch',
+      guardAutoResumeTip: 'Medium risk: Automatically resumes the current conversation after the desktop app restarts; best used with Agent Auto-Switch.',
+      guardSkipOnboardingLabel: 'Skip Repeated Onboarding Modal',
+      guardSkipOnboardingTip: 'Low risk: Updates the local onboarding state on switch to reduce repeated terms prompts; leave off to avoid modifying app settings.',
+      guardInfoLabel: 'Setting details',
+      guardOn: 'On',
+      guardOff: 'Off',
+      newLoginConfirmMsg: 'Will back up your current account and restart Antigravity into official native Google sign-in. After signing in, click "Save Account" to add it to the list.',
       newLoginConfirmBtn: 'Confirm & Restart',
       logsSummary: 'Recent Switch Logs',
       noLogs: 'No logs yet',
@@ -194,16 +212,13 @@
       errReadState: 'Failed to load account status',
       errActionFailed: 'Operation failed',
       errSwitchFailed: 'Switch failed',
-      errOAuthIncomplete: 'Browser authorization did not complete. Please try again.',
-      noticeOAuthAdded: 'Account added via browser OAuth ({email})',
-      noticeBrowserOpened: 'Browser authorization opened — complete sign-in in your browser…',
-      noticeBrowserFallback: 'Click "Open Auth Page" or copy the URL below to sign in…',
-      noticeCopied: 'Auth URL copied. Paste it into an incognito window or another browser profile.',
-      noticeCopyRestricted: 'Clipboard restricted; URL selected above — press Ctrl+C to copy.',
-      noticeOAuthCancelled: 'Browser authorization cancelled.',
+      noticeNewLoginRestarting: 'Restarting Antigravity for official native Google sign-in…',
       noticeRefreshed: 'Accounts & usage refreshed',
       noticeRefreshedLocal: 'Local account status refreshed',
-      noticeGuardSaved: 'Agent guard settings saved',
+      noticeGuardSaved: 'Advanced settings updated',
+      noticeGuardCooldown: 'Advanced Settings cooling down — please try again in {sec}s',
+      noticeGuardCooldownFallback: 'Advanced Settings cooling down — please try again shortly',
+      errGuardSave: 'Could not update advanced settings',
     },
   };
 
@@ -224,18 +239,16 @@
     revealEmails: false,
     busy: false,
     refreshing: false,
+    loadingState: false,
     noticeTimer: null,
     confirm: null, // { type: 'switch' | 'remove' | 'new-login', id?: string }
     rename: null, // { id: string, value: string }
     usageOpen: {}, // { [id]: boolean }
-    usageById: {}, // { [id]: { status: 'idle' | 'loading' | 'loaded' | 'error', data: object | null, error: string } }
+    usageById: {}, // { [id]: { status, data, source, capturedAt, isStale, estimatedAnyReset, hasSnapshot, error } }
     usageLastFetchAt: {}, // { [id]: number }
-    didInitialTierSync: false,
-    guardDirty: false,
-    oauthPanelOpen: false,
-    oauth: { status: 'idle', authUrl: '' },
-    pollTimer: null,
+    guardPatch: {},
   };
+  let guardSaveQueue = Promise.resolve();
 
   function el(id) {
     return document.getElementById(id);
@@ -292,6 +305,9 @@
       addPath('M4.25 4.25l.6 8.5a1 1 0 0 0 1 .95h4.3a1 1 0 0 0 1-.95l.6-8.5');
     } else if (name === 'chevron-right') {
       addPath('M6 3.5l4.5 4.5-4.5 4.5');
+    } else if (name === 'info') {
+      addCircle(8, 8, 6.25);
+      addPath('M8 7.5v3.25M8 5.25h.01');
     }
 
     return svg;
@@ -321,7 +337,7 @@
       box.textContent = '';
       return;
     }
-    box.className = `notice ${kind === 'err' ? 'notice-err' : 'notice-ok'}`;
+    box.className = `notice notice-${kind}`;
     box.textContent = text;
     if (autoHideMs > 0) {
       state.noticeTimer = setTimeout(() => {
@@ -370,6 +386,9 @@
       const err = new Error(payload.error || t('errRequestFailed', { status: res.status }));
       err.status = res.status;
       err.code = payload.code || '';
+      err.retryAfterSec = Number.isFinite(Number(payload.retryAfterSec))
+        ? Math.max(1, Math.ceil(Number(payload.retryAfterSec)))
+        : 0;
       err.activeWork = payload.activeWork || null;
       throw err;
     }
@@ -483,59 +502,97 @@
     labelEl.textContent = formatUsageWindowLabel(bucket);
     left.appendChild(labelEl);
 
-    const hasFraction = typeof bucket?.remainingFraction === 'number' && Number.isFinite(bucket.remainingFraction);
-    if (hasFraction && bucket.remainingFraction < 0.995) {
-      const resetText = formatResetCountdown(bucket.resetTime);
-      if (resetText) {
-        const resetEl = document.createElement('div');
-        resetEl.className = 'usage-bucket-reset';
-        resetEl.textContent = resetText;
-        left.appendChild(resetEl);
-      }
+    const estimatedReset = bucket?.estimatedReset === true;
+    const fraction = estimatedReset ? 1 : bucket?.remainingFraction;
+    const hasFraction = typeof fraction === 'number' && Number.isFinite(fraction);
+    let resetText = '';
+    if (estimatedReset) {
+      resetText = t('usageEstimatedReset');
+    } else if (hasFraction && fraction < 0.995) {
+      resetText = formatResetCountdown(bucket.resetTime);
+    }
+    if (resetText) {
+      const resetEl = document.createElement('div');
+      resetEl.className = estimatedReset ? 'usage-bucket-reset usage-reset-est' : 'usage-bucket-reset';
+      resetEl.textContent = resetText;
+      left.appendChild(resetEl);
     }
 
     const right = document.createElement('div');
     right.className = 'usage-bucket-right';
     const pctEl = document.createElement('span');
     pctEl.className = 'usage-pct';
-    if (hasFraction) {
-      const pct = Math.round(Math.min(1, Math.max(0, bucket.remainingFraction)) * 100);
+    if (estimatedReset) {
+      pctEl.textContent = t('usageEstimatedFull');
+    } else if (hasFraction) {
+      const pct = Math.round(Math.min(1, Math.max(0, fraction)) * 100);
       pctEl.textContent = t('usageLeft', { pct });
     } else {
       pctEl.textContent = bucket?.disabled ? t('usageDisabled') : t('usageUnavailablePct');
     }
 
-    const ring = createUsageRingSvg(
-      bucket?.disabled && !hasFraction ? null : hasFraction ? bucket.remainingFraction : null
-    );
+    const ring = createUsageRingSvg(hasFraction ? fraction : null);
     right.append(pctEl, ring);
     row.append(left, right);
     return row;
   }
 
   function createUsageCardNode(acc, switching) {
-    const entry = state.usageById[acc.id] || { status: 'idle', data: null, error: '' };
+    const entry = state.usageById[acc.id] || {};
     const isLoading = entry.status === 'loading';
+    const hasLive = acc.isActive && entry.source === 'live';
+    const hasSnapshot = entry.hasSnapshot && entry.source === 'snapshot';
+    const usage = acc.isActive || hasSnapshot ? entry.data : null;
 
     const card = document.createElement('div');
-    card.className = isLoading && entry.data ? 'usage-card usage-card-refreshing' : 'usage-card';
+    card.className = isLoading && usage ? 'usage-card usage-card-refreshing' : 'usage-card';
 
     const head = document.createElement('div');
     head.className = 'usage-card-head';
     const titleEl = document.createElement('span');
     titleEl.className = 'usage-card-title';
     titleEl.textContent = t('usageHeading');
-    const reloadBtn = createIconButton(
-      'refresh',
-      isLoading ? 'btn btn-icon btn-icon-sm is-spinning' : 'btn btn-icon btn-icon-sm',
-      () => void loadAccountUsage(acc.id, { forceRefresh: true }),
-      switching || isLoading,
-      t('usageRefreshTitle')
-    );
-    head.append(titleEl, reloadBtn);
+    head.appendChild(titleEl);
+    if (hasLive || hasSnapshot) {
+      const badge = document.createElement('span');
+      badge.className = 'usage-source-badge';
+      if (hasLive) {
+        badge.textContent = t('usageLive');
+      } else {
+        const timestamp = Date.parse(entry.capturedAt);
+        badge.textContent = t('usageSnapshot');
+        if (Number.isFinite(timestamp)) {
+          const time = new Date(timestamp).toLocaleTimeString(state.lang === 'en' ? 'en-US' : 'zh-CN', {
+            hour: '2-digit',
+            minute: '2-digit',
+            hourCycle: 'h23',
+          });
+          badge.textContent += ` · ${time}`;
+        }
+      }
+      head.appendChild(badge);
+    }
+    if (acc.isActive) {
+      head.appendChild(
+        createIconButton(
+          'refresh',
+          isLoading ? 'btn btn-icon btn-icon-sm is-spinning' : 'btn btn-icon btn-icon-sm',
+          () => void loadAccountUsage(acc.id, { forceRefresh: true }),
+          switching || isLoading,
+          t('usageRefreshTitle')
+        )
+      );
+    }
     card.appendChild(head);
 
-    if (isLoading && !entry.data) {
+    if (hasSnapshot && entry.isStale) {
+      const staleHint = document.createElement('div');
+      staleHint.className = 'usage-stale-hint';
+      staleHint.textContent = t('usageStaleSnapshot');
+      card.appendChild(staleHint);
+    }
+
+    if (isLoading && !usage) {
       const loadingEl = document.createElement('div');
       loadingEl.className = 'usage-status-text';
       loadingEl.textContent = t('usageLoading');
@@ -543,7 +600,7 @@
       return card;
     }
 
-    if (entry.status === 'error' && !entry.data) {
+    if (entry.status === 'error' && !usage) {
       const errBox = document.createElement('div');
       errBox.className = 'usage-error';
       const msg = document.createElement('span');
@@ -551,7 +608,7 @@
       const retryBtn = createButton(
         t('usageRetry'),
         'btn btn-secondary btn-sm',
-        () => void loadAccountUsage(acc.id, { forceRefresh: true }),
+        () => void loadAccountUsage(acc.id, { forceRefresh: acc.isActive }),
         switching
       );
       errBox.append(msg, retryBtn);
@@ -568,11 +625,12 @@
       card.appendChild(errBox);
     }
 
-    const groups = Array.isArray(entry.data?.groups) ? entry.data.groups : [];
-    if (groups.length === 0) {
+    const groups = Array.isArray(usage?.groups) ? usage.groups : [];
+    const noSnapshot = !acc.isActive && entry.status === 'loaded' && (!entry.hasSnapshot || entry.source === 'none');
+    if (noSnapshot || groups.length === 0) {
       const emptyEl = document.createElement('div');
       emptyEl.className = 'usage-status-text';
-      emptyEl.textContent = t('usageEmpty');
+      emptyEl.textContent = t(noSnapshot ? 'usageNoSnapshot' : 'usageEmpty');
       card.appendChild(emptyEl);
       return card;
     }
@@ -638,11 +696,13 @@
     const langBtn = el('toggle-lang-btn');
     langBtn.textContent = t('langBtnText');
     langBtn.title = t('langBtnTitle');
+    langBtn.setAttribute('aria-label', t('langBtnTitle'));
 
     const revealBtn = el('toggle-reveal-btn');
     const revealLabel = state.revealEmails ? t('revealHideTitle') : t('revealShowTitle');
     revealBtn.title = revealLabel;
     revealBtn.setAttribute('aria-label', revealLabel);
+    revealBtn.disabled = state.loadingState;
     revealBtn.replaceChildren(createIcon(state.revealEmails ? 'eye-off' : 'eye'));
 
     const refreshBtn = el('refresh-btn');
@@ -656,27 +716,33 @@
     }
 
     el('saved-heading').textContent = t('savedAccounts');
-    el('capture-label').placeholder = t('captureLabelPlaceholder');
+    el('add-account-btn').textContent = t('addAccountBtn');
+    const captureLabel = el('capture-label');
+    captureLabel.placeholder = t('captureLabelPlaceholder');
+    captureLabel.setAttribute('aria-label', t('captureLabel'));
     el('capture-btn').textContent = t('captureBtn');
-    el('oauth-label').placeholder = t('oauthLabelPlaceholder');
-    el('oauth-start-btn').textContent = t('oauthStartBtn');
-    el('oauth-hide-btn').textContent = t('collapseBtn');
-    el('oauth-link').textContent = t('openAuthPage');
-    el('oauth-copy-btn').textContent = t('copyAuthUrl');
-    el('oauth-cancel-btn').textContent = t('cancelOAuth');
 
+    el('tools-card').setAttribute('aria-label', t('toolsLabel'));
     el('guard-summary').textContent = t('guardSummary');
     el('guard-alert-label').textContent = t('guardAlertLabel');
+    el('guard-alert-tip').textContent = t('guardAlertTip');
     el('guard-watch-weekly-label').textContent = t('guardWatchWeeklyLabel');
     el('guard-watch-5h-label').textContent = t('guardWatch5hLabel');
     el('guard-threshold-label').textContent = t('guardThresholdLabel');
+    el('guard-threshold-tip').textContent = t('guardThresholdTip');
+    el('guard-dynamic-threshold-label').textContent = t('guardDynamicThresholdLabel');
+    el('guard-dynamic-threshold-tip').textContent = t('guardDynamicThresholdTip');
+    el('guard-natural-pause-label').textContent = t('guardNaturalPauseLabel');
+    el('guard-natural-pause-tip').textContent = t('guardNaturalPauseTip');
     el('guard-auto-switch-label').textContent = t('guardAutoSwitchLabel');
+    el('guard-auto-switch-tip').textContent = t('guardAutoSwitchTip');
     el('guard-auto-resume-label').textContent = t('guardAutoResumeLabel');
-    el('guard-save-btn').textContent = t('guardSaveBtn');
-
-    el('fallback-summary').textContent = t('fallbackSummary');
-    el('fallback-desc').textContent = t('fallbackDesc');
-    el('new-login-btn').textContent = t('newLoginBtn');
+    el('guard-auto-resume-tip').textContent = t('guardAutoResumeTip');
+    el('guard-skip-onboarding-label').textContent = t('guardSkipOnboardingLabel');
+    el('guard-skip-onboarding-tip').textContent = t('guardSkipOnboardingTip');
+    for (const button of el('guard-settings-form').querySelectorAll('.info-tip-btn')) {
+      button.setAttribute('aria-label', t('guardInfoLabel'));
+    }
 
     el('logs-summary').textContent = t('logsSummary');
     el('footer-note').textContent = t('footerNote');
@@ -726,116 +792,6 @@
     return [title, list, hint, row];
   }
 
-  function stopOAuthPolling() {
-    if (state.pollTimer) {
-      clearInterval(state.pollTimer);
-      state.pollTimer = null;
-    }
-  }
-
-  function startOAuthPolling() {
-    if (state.pollTimer) return;
-    state.pollTimer = setInterval(() => {
-      void pollOAuthStatus();
-    }, 1500);
-  }
-
-  async function pollOAuthStatus() {
-    if (!state.oauth || (state.oauth.status !== 'pending' && state.oauth.status !== 'exchanging')) {
-      stopOAuthPolling();
-      return;
-    }
-    try {
-      const res = await apiPost('/api/oauth/status');
-      const oauth = res?.oauth || { status: 'idle' };
-      state.oauth = oauth;
-      if (oauth.status === 'succeeded') {
-        stopOAuthPolling();
-        state.oauthPanelOpen = false;
-        el('oauth-label').value = '';
-        el('oauth-url-preview').value = '';
-        if (res.active && res.accounts) {
-          state.data = res;
-        }
-        showNotice(t('noticeOAuthAdded', { email: oauth.maskedEmail || '' }), 'ok');
-        render();
-      } else if (oauth.status === 'failed' || oauth.status === 'expired') {
-        stopOAuthPolling();
-        el('oauth-url-preview').value = '';
-        if (res.active && res.accounts) {
-          state.data = res;
-        }
-        showNotice(oauth.error || t('errOAuthIncomplete'), 'err');
-        render();
-      } else if (oauth.status === 'exchanging') {
-        renderOAuthPanel(Boolean(state.data?.switching || state.busy));
-      }
-    } catch {
-      // Transient polling errors are ignored until user cancels or timeout triggers
-    }
-  }
-
-  function renderOAuthPanel(switching) {
-    const panel = el('oauth-panel');
-    const toggleBtn = el('oauth-toggle-btn');
-    const form = el('oauth-form');
-    const pendingBox = el('oauth-pending-box');
-    const linkEl = el('oauth-link');
-    const previewEl = el('oauth-url-preview');
-    const startBtn = el('oauth-start-btn');
-    const cancelBtn = el('oauth-cancel-btn');
-    const pendingMsg = el('oauth-pending-msg');
-
-    const oauthStatus = state.oauth?.status || 'idle';
-    const inFlow = oauthStatus === 'pending' || oauthStatus === 'exchanging';
-    const showPanel = state.oauthPanelOpen || inFlow;
-
-    panel.className = showPanel ? 'oauth-panel' : 'oauth-panel hidden';
-    toggleBtn.disabled = switching;
-    toggleBtn.textContent = showPanel ? t('collapseAddBtn') : t('addAccountBtn');
-
-    if (!showPanel) {
-      previewEl.value = '';
-      linkEl.removeAttribute('href');
-      return;
-    }
-
-    form.className = inFlow ? 'inline-form hidden' : 'inline-form';
-    startBtn.disabled = switching || state.busy;
-
-    if (inFlow) {
-      pendingBox.className = 'confirm-box';
-      if (oauthStatus === 'exchanging') {
-        pendingMsg.textContent = t('oauthExchangingMsg');
-        linkEl.className = 'btn btn-primary hidden';
-        linkEl.removeAttribute('href');
-        previewEl.className = 'url-preview hidden';
-        el('oauth-copy-btn').className = 'btn btn-secondary hidden';
-      } else {
-        pendingMsg.textContent = t('oauthPendingMsg');
-        const validUrl = GOOGLE_AUTH_URL_RE.test(state.oauth.authUrl || '') ? state.oauth.authUrl : '';
-        if (validUrl) {
-          linkEl.href = validUrl;
-          linkEl.className = 'btn btn-primary';
-          previewEl.value = validUrl;
-          previewEl.className = 'url-preview';
-          el('oauth-copy-btn').className = 'btn btn-secondary';
-        } else {
-          linkEl.removeAttribute('href');
-          linkEl.className = 'btn btn-primary hidden';
-          previewEl.value = '';
-          previewEl.className = 'url-preview hidden';
-          el('oauth-copy-btn').className = 'btn btn-secondary hidden';
-        }
-      }
-      cancelBtn.disabled = switching;
-    } else {
-      pendingBox.className = 'confirm-box hidden';
-      linkEl.removeAttribute('href');
-      previewEl.value = '';
-    }
-  }
-
   function renderHeaderAndUnsavedBanner(data) {
     const active = data?.active || {};
     const accounts = Array.isArray(data?.accounts) ? data.accounts : [];
@@ -875,11 +831,13 @@
       captureForm.className = 'inline-form hidden';
     }
 
-    const newLoginBtn = el('new-login-btn');
+    const addAccountBtn = el('add-account-btn');
     const confirmBox = el('new-login-confirm');
-    newLoginBtn.disabled = switching;
+    const confirmingNewLogin = state.confirm?.type === 'new-login';
+    addAccountBtn.disabled = switching;
+    addAccountBtn.setAttribute('aria-expanded', String(confirmingNewLogin));
 
-    if (state.confirm?.type === 'new-login') {
+    if (confirmingNewLogin) {
       confirmBox.className = 'confirm-box';
       if (state.confirm.blockedWork) {
         confirmBox.replaceChildren(
@@ -1181,7 +1139,7 @@
         const elapsed = lastAt > 0 ? Date.now() - lastAt : Infinity;
         if (
           cur?.status !== 'loading' &&
-          (isInitialExpand || cur.status === 'error' || elapsed > USAGE_EXPAND_REFRESH_MS)
+          (!acc.isActive || isInitialExpand || cur.status === 'error' || elapsed > USAGE_EXPAND_REFRESH_MS)
         ) {
           void loadAccountUsage(acc.id, { forceRefresh: !isInitialExpand });
           return;
@@ -1215,7 +1173,6 @@
       }
     }
     el('saved-count').textContent = String(accounts.length);
-    renderOAuthPanel(switching);
     const listEl = el('accounts-list');
 
     if (accounts.length === 0) {
@@ -1230,21 +1187,39 @@
     listEl.replaceChildren(...nodes);
   }
 
-  function renderGuardSettings(data) {
-    const switching = Boolean(data?.switching || state.busy);
-    const settings = data?.settings;
-    el('guard-save-btn').disabled = switching;
-    if (!settings || state.guardDirty) return;
-    el('guard-alert-enabled').checked = Boolean(settings.alertEnabled);
-    el('guard-watch-weekly').checked = Boolean(settings.watchWeekly);
-    el('guard-watch-5h').checked = Boolean(settings.watch5h);
-    const normalizedThreshold = Math.min(
-      50,
-      Math.max(10, Math.round((Number(settings.thresholdPercent) || 10) / 10) * 10)
-    );
-    el('guard-threshold').value = String(normalizedThreshold);
-    el('guard-auto-switch').checked = Boolean(settings.autoSwitchEnabled);
-    el('guard-auto-resume').checked = Boolean(settings.autoResumeEnabled);
+  function guardSettingsDisabled() {
+    return !state.data?.settings || state.data.switching || state.busy ||
+      state.refreshing || state.loadingState;
+  }
+
+  function renderGuardSettings() {
+    const disabled = guardSettingsDisabled();
+    const settings = { ...state.data?.settings, ...state.guardPatch };
+    for (const [id, key, fallback = false] of GUARD_TOGGLES) {
+      const enabled = Boolean(settings[key] ?? fallback);
+      for (const button of el(id).querySelectorAll('.guard-seg-btn')) {
+        const value = button.dataset.value === 'true';
+        const selected = value === enabled;
+        button.disabled = disabled;
+        button.setAttribute('aria-checked', String(selected));
+        button.tabIndex = selected ? 0 : -1;
+        button.textContent = t(value ? 'guardOn' : 'guardOff');
+      }
+    }
+
+    const threshold = el('guard-threshold');
+    const value = String(settings.thresholdPercent ?? 10);
+    const savedOption = threshold.querySelector('[data-saved-threshold]');
+    if (savedOption?.value !== value) {
+      savedOption?.remove();
+      if (!Array.from(threshold.options).some((option) => option.value === value)) {
+        const option = new Option(`${value}%`, value);
+        option.dataset.savedThreshold = '';
+        threshold.prepend(option);
+      }
+    }
+    threshold.value = value;
+    threshold.disabled = disabled;
   }
 
   function renderLogs(data) {
@@ -1256,56 +1231,96 @@
     applyStaticI18n();
     renderHeaderAndUnsavedBanner(state.data);
     renderAccountsSection(state.data);
-    renderGuardSettings(state.data);
+    renderGuardSettings();
     renderLogs(state.data);
   }
 
   async function refreshState(silent = false) {
+    state.loadingState = true;
+    applyStaticI18n();
+    renderGuardSettings();
     try {
       const data = await apiPost('/api/state');
       state.data = data;
       if (!silent) showNotice('');
-      render();
-      if (!state.didInitialTierSync) {
-        void syncMissingTiersInBackground();
-      }
     } catch (err) {
       showNotice(err.message || t('errReadState'), 'err');
+    } finally {
+      state.loadingState = false;
+      render();
     }
   }
 
-  async function syncMissingTiersInBackground() {
-    if (state.didInitialTierSync) return;
-    const accounts = Array.isArray(state.data?.accounts) ? state.data.accounts : [];
-    if (!accounts.some((a) => !a.tierName)) return;
-    state.didInitialTierSync = true;
-    try {
-      const res = await apiPost('/api/accounts/sync-tiers', { onlyMissing: true });
-      if (res?.active && res?.accounts) {
-        state.data = res;
-        if (!state.rename) {
-          render();
-        }
-      }
-    } catch {
-      // Silent best-effort tier enrichment
+  async function saveGuardSetting(key, value) {
+    if (guardSettingsDisabled()) return;
+    if (Object.hasOwn(state.guardPatch, key)) {
+      renderGuardSettings();
+      return;
     }
+    state.guardPatch[key] = value;
+    renderGuardSettings();
+
+    // The server returns a full settings snapshot, so apply save responses in order.
+    guardSaveQueue = guardSaveQueue.then(async () => {
+      let data;
+      try {
+        data = await apiPost('/api/settings/update', { [key]: value });
+        if (!data?.settings) throw new Error(t('errGuardSave'));
+        showNotice(t('noticeGuardSaved'), 'ok', { autoHideMs: 2000 });
+      } catch (err) {
+        if (err?.status === 429 || err?.code === 'RATE_LIMITED') {
+          const sec = err.retryAfterSec || 0;
+          const message = sec ? t('noticeGuardCooldown', { sec }) : t('noticeGuardCooldownFallback');
+          showNotice(message, 'warn', { autoHideMs: Math.min(6000, Math.max(3000, sec * 1000)) });
+        } else {
+          // The server may have saved the setting before returning an error.
+          data = await apiPost('/api/state').catch(() => null);
+          showNotice(t('errGuardSave'), 'err');
+        }
+      } finally {
+        if (data?.settings) {
+          const { settings, logs, quotaAlert } = data;
+          state.data = { ...state.data, settings, logs, quotaAlert };
+          renderLogs(state.data);
+        }
+        delete state.guardPatch[key];
+        renderGuardSettings();
+      }
+    });
+    await guardSaveQueue;
   }
 
   async function loadAccountUsage(id, { forceRefresh = false } = {}) {
-    const prev = state.usageById[id];
-    if (prev?.status === 'loading') return;
+    const account = state.data?.accounts?.find((acc) => acc.id === id);
+    if (!account) return;
+    const prev = state.usageById[id] || {
+      data: null,
+      source: 'none',
+      capturedAt: '',
+      isStale: false,
+      estimatedAnyReset: false,
+      hasSnapshot: false,
+    };
+    if (prev.status === 'loading') return;
     state.usageById[id] = {
+      ...prev,
       status: 'loading',
-      data: prev?.data || null,
       error: '',
     };
     render();
     try {
-      const res = await apiPost('/api/accounts/usage', { id, forceRefresh });
+      const res = await apiPost('/api/accounts/usage', {
+        id,
+        forceRefresh: Boolean(account.isActive && forceRefresh),
+      });
       state.usageById[id] = {
         status: 'loaded',
-        data: res?.usage || null,
+        data: res?.usage ?? null,
+        source: res?.source ?? 'none',
+        capturedAt: res?.capturedAt ?? '',
+        isStale: Boolean(res?.isStale),
+        estimatedAnyReset: Boolean(res?.estimatedAnyReset),
+        hasSnapshot: Boolean(res?.hasSnapshot),
         error: '',
       };
       state.usageLastFetchAt[id] = Date.now();
@@ -1319,8 +1334,8 @@
       }
     } catch (err) {
       state.usageById[id] = {
+        ...prev,
         status: 'error',
-        data: prev?.data || null,
         error: err?.message || t('errUsageFailed'),
       };
     } finally {
@@ -1334,39 +1349,29 @@
     showNotice('');
     render();
     const startedAt = Date.now();
-    let syncedRemote = false;
+    let hasOpenUsage = false;
     let failed = false;
     try {
-      try {
-        const res = await apiPost('/api/accounts/sync-tiers', { onlyMissing: false });
-        if (res?.active && res?.accounts) {
-          state.data = res;
-          syncedRemote = true;
-          render();
-        }
-      } catch {
-        try {
-          const data = await apiPost('/api/state');
-          state.data = data;
-          render();
-        } catch (err) {
-          failed = true;
-          showNotice(err.message || t('errReadState'), 'err');
-        }
-      }
-      const openIds = Object.keys(state.usageOpen).filter((id) => state.usageOpen[id]);
-      if (openIds.length > 0) {
-        await Promise.allSettled(openIds.map((id) => loadAccountUsage(id, { forceRefresh: true })));
-      }
+      const data = await apiPost('/api/state');
+      state.data = data;
+      render();
+      const openAccounts = (data.accounts || []).filter((acc) => state.usageOpen[acc.id]);
+      hasOpenUsage = openAccounts.length > 0;
+      await Promise.allSettled(
+        openAccounts.map((acc) => loadAccountUsage(acc.id, { forceRefresh: acc.isActive }))
+      );
+    } catch (err) {
+      failed = true;
+      showNotice(err.message || t('errReadState'), 'err');
+    } finally {
       const elapsed = Date.now() - startedAt;
       if (elapsed < 320) {
         await new Promise((r) => setTimeout(r, 320 - elapsed));
       }
-    } finally {
       state.refreshing = false;
       render();
       if (!failed && !el('notice').textContent) {
-        showNotice(syncedRemote ? t('noticeRefreshed') : t('noticeRefreshedLocal'), 'ok', {
+        showNotice(hasOpenUsage ? t('noticeRefreshed') : t('noticeRefreshedLocal'), 'ok', {
           autoHideMs: 2500,
         });
       }
@@ -1403,6 +1408,7 @@
 
   async function executeSwitchAction(apiPath, body, confirmTarget) {
     state.busy = true;
+    showNotice('');
     render();
     try {
       const res = await apiPost(apiPath, body);
@@ -1410,7 +1416,9 @@
         state.data = { ...(state.data || {}), switching: true };
       }
       state.confirm = null;
-      if (res?.message) {
+      if (confirmTarget.type === 'new-login' && res?.switching) {
+        showNotice(t('noticeNewLoginRestarting'), 'ok');
+      } else if (res?.message) {
         showNotice(res.message, 'ok');
       }
     } catch (err) {
@@ -1420,7 +1428,9 @@
           blockedWork: err.activeWork || { count: 1, items: [], truncated: false },
         };
       }
-      showNotice(err.message || t('errSwitchFailed'), 'err');
+      if (confirmTarget.type !== 'new-login' || err.code !== 'ACTIVE_WORK_RUNNING') {
+        showNotice(err.message || t('errSwitchFailed'), 'err');
+      }
     } finally {
       state.busy = false;
       render();
@@ -1457,106 +1467,37 @@
       });
     });
 
-    el('oauth-toggle-btn').addEventListener('click', () => {
-      const inFlow = state.oauth?.status === 'pending' || state.oauth?.status === 'exchanging';
-      if (inFlow) return;
-      state.oauthPanelOpen = !state.oauthPanelOpen;
-      render();
-    });
-
-    el('oauth-hide-btn').addEventListener('click', () => {
-      state.oauthPanelOpen = false;
-      render();
-    });
-
-    el('oauth-form').addEventListener('submit', (e) => {
-      e.preventDefault();
-      const label = el('oauth-label').value;
-      executeAction(
-        async () => {
-          const res = await apiPost('/api/oauth/start', { label });
-          const oauth = res?.oauth || { status: 'idle' };
-          state.oauth = oauth;
-          state.oauthPanelOpen = true;
-          if (oauth.status === 'pending') {
-            startOAuthPolling();
-            return {
-              message: oauth.browserOpened ? t('noticeBrowserOpened') : t('noticeBrowserFallback'),
-            };
-          }
-          return {};
-        },
-        { autoHideMs: 0 }
-      );
-    });
-
-    el('oauth-copy-btn').addEventListener('click', async () => {
-      const authUrl = GOOGLE_AUTH_URL_RE.test(state.oauth?.authUrl || '') ? state.oauth.authUrl : '';
-      if (!authUrl) return;
-      const previewEl = el('oauth-url-preview');
-      try {
-        await navigator.clipboard.writeText(authUrl);
-        showNotice(t('noticeCopied'), 'ok');
-      } catch {
-        previewEl.focus();
-        previewEl.select();
-        showNotice(t('noticeCopyRestricted'), 'err');
-      }
-    });
-
-    el('oauth-cancel-btn').addEventListener('click', () => {
-      stopOAuthPolling();
-      executeAction(async () => {
-        const res = await apiPost('/api/oauth/cancel');
-        state.oauth = res?.oauth || { status: 'idle' };
-        state.oauthPanelOpen = false;
-        el('oauth-url-preview').value = '';
-        return { message: t('noticeOAuthCancelled') };
-      });
-    });
-
-    el('new-login-btn').addEventListener('click', () => {
+    el('add-account-btn').addEventListener('click', () => {
       state.confirm = { type: 'new-login' };
       state.rename = null;
       render();
     });
 
-    const guardForm = el('guard-settings-form');
-    for (const inputId of [
-      'guard-alert-enabled',
-      'guard-watch-weekly',
-      'guard-watch-5h',
-      'guard-threshold',
-      'guard-auto-switch',
-      'guard-auto-resume',
-    ]) {
-      el(inputId).addEventListener('input', () => {
-        state.guardDirty = true;
-      });
-      el(inputId).addEventListener('change', () => {
-        state.guardDirty = true;
+    for (const button of el('guard-settings-form').querySelectorAll('.info-tip-btn')) {
+      button.appendChild(createIcon('info'));
+    }
+    for (const [id, key] of GUARD_TOGGLES) {
+      const group = el(id);
+      const buttons = Array.from(group.querySelectorAll('.guard-seg-btn'));
+      for (const button of buttons) {
+        button.addEventListener('click', async () => {
+          if (button.getAttribute('aria-checked') === 'true') return;
+          const hadFocus = group.contains(document.activeElement);
+          await saveGuardSetting(key, button.dataset.value === 'true');
+          if (hadFocus && (document.activeElement === document.body || group.contains(document.activeElement))) {
+            group.querySelector('[aria-checked="true"]').focus({ preventScroll: true });
+          }
+        });
+      }
+      group.addEventListener('keydown', (event) => {
+        if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return;
+        event.preventDefault();
+        buttons.find((button) => button !== event.target)?.click();
       });
     }
-    guardForm.addEventListener('submit', (e) => {
-      e.preventDefault();
-      const rawThreshold = Number(el('guard-threshold').value);
-      const thresholdPercent = [10, 20, 30, 40, 50].includes(rawThreshold) ? rawThreshold : 10;
-      const payload = {
-        alertEnabled: el('guard-alert-enabled').checked,
-        watchWeekly: el('guard-watch-weekly').checked,
-        watch5h: el('guard-watch-5h').checked,
-        thresholdPercent,
-        autoSwitchEnabled: el('guard-auto-switch').checked,
-        autoResumeEnabled: el('guard-auto-resume').checked,
-      };
-      executeAction(
-        async () => {
-          const res = await apiPost('/api/settings/update', payload);
-          state.guardDirty = false;
-          return { ...res, message: t('noticeGuardSaved') };
-        },
-        { autoHideMs: 2500 }
-      );
+    const threshold = el('guard-threshold');
+    threshold.addEventListener('change', () => {
+      void saveGuardSetting('thresholdPercent', Number(threshold.value));
     });
   }
 
@@ -1568,7 +1509,6 @@
 
   document.addEventListener('DOMContentLoaded', () => {
     syncScheme();
-    applyStaticI18n();
     bindEvents();
     refreshState(true);
   });

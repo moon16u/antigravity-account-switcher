@@ -2,26 +2,23 @@ import { lstatSync, readdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { callLsRpc } from './active-work.mjs';
-import { assertNotSymlink, atomicWriteFile } from './token-store.mjs';
-import { maskEmail } from './vault.mjs';
+import { atomicWriteFile, maskEmail, readSafeJsonFile } from './vault.mjs';
 
 const MAX_GUARD_JSON_BYTES = 64 * 1024;
 const MAX_HUB_JSON_BYTES = 32 * 1024;
-const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
 export const DEFAULT_GUARD_SETTINGS = Object.freeze({
   alertEnabled: true,
   autoSwitchEnabled: false,
   autoResumeEnabled: false,
+  skipOnboardingPrompt: false,
+  dynamicThresholdEnabled: true,
+  naturalPauseEnabled: true,
   thresholdPercent: 10,
   watchWeekly: true,
   watch5h: true,
   switchDelaySec: 3,
 });
-
-function hasOwn(obj, key) {
-  return Object.prototype.hasOwnProperty.call(obj, key);
-}
 
 function clampInt(val, min, max, fallback) {
   const num = Number(val);
@@ -45,47 +42,40 @@ function sanitizeText(val, maxLen = 120) {
 }
 
 export function normalizeGuardSettings(raw, base = DEFAULT_GUARD_SETTINGS) {
-  const fallback = base && typeof base === 'object' ? base : DEFAULT_GUARD_SETTINGS;
+  const fallback = base && typeof base === 'object' && !Array.isArray(base) ? base : {};
   const src = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
-
-  const pickBool = (key, defVal) => {
-    if (FORBIDDEN_KEYS.has(key) || !hasOwn(src, key)) return Boolean(defVal);
-    return Boolean(src[key]);
-  };
+  const defaultFor = (key) =>
+    Object.hasOwn(fallback, key) ? fallback[key] ?? DEFAULT_GUARD_SETTINGS[key] : DEFAULT_GUARD_SETTINGS[key];
+  const valueFor = (key) => Object.hasOwn(src, key) ? src[key] : defaultFor(key);
 
   return {
-    alertEnabled: pickBool('alertEnabled', fallback.alertEnabled ?? DEFAULT_GUARD_SETTINGS.alertEnabled),
-    autoSwitchEnabled: pickBool(
-      'autoSwitchEnabled',
-      fallback.autoSwitchEnabled ?? DEFAULT_GUARD_SETTINGS.autoSwitchEnabled
-    ),
-    autoResumeEnabled: pickBool(
-      'autoResumeEnabled',
-      fallback.autoResumeEnabled ?? DEFAULT_GUARD_SETTINGS.autoResumeEnabled
-    ),
-    thresholdPercent: hasOwn(src, 'thresholdPercent')
-      ? clampInt(src.thresholdPercent, 1, 50, fallback.thresholdPercent ?? DEFAULT_GUARD_SETTINGS.thresholdPercent)
-      : clampInt(fallback.thresholdPercent, 1, 50, DEFAULT_GUARD_SETTINGS.thresholdPercent),
-    watchWeekly: pickBool('watchWeekly', fallback.watchWeekly ?? DEFAULT_GUARD_SETTINGS.watchWeekly),
-    watch5h: pickBool('watch5h', fallback.watch5h ?? DEFAULT_GUARD_SETTINGS.watch5h),
-    switchDelaySec: hasOwn(src, 'switchDelaySec')
-      ? clampInt(src.switchDelaySec, 1, 10, fallback.switchDelaySec ?? DEFAULT_GUARD_SETTINGS.switchDelaySec)
-      : clampInt(fallback.switchDelaySec, 1, 10, DEFAULT_GUARD_SETTINGS.switchDelaySec),
+    alertEnabled: Boolean(valueFor('alertEnabled')),
+    autoSwitchEnabled: Boolean(valueFor('autoSwitchEnabled')),
+    autoResumeEnabled: Boolean(valueFor('autoResumeEnabled')),
+    skipOnboardingPrompt: Boolean(valueFor('skipOnboardingPrompt')),
+    dynamicThresholdEnabled: Boolean(valueFor('dynamicThresholdEnabled')),
+    naturalPauseEnabled: Boolean(valueFor('naturalPauseEnabled')),
+    thresholdPercent: clampInt(valueFor('thresholdPercent'), 1, 50, defaultFor('thresholdPercent')),
+    watchWeekly: Boolean(valueFor('watchWeekly')),
+    watch5h: Boolean(valueFor('watch5h')),
+    switchDelaySec: clampInt(valueFor('switchDelaySec'), 1, 10, defaultFor('switchDelaySec')),
   };
 }
 
-function readSafeJsonFile(filePath, maxBytes = MAX_GUARD_JSON_BYTES) {
-  if (!filePath || typeof filePath !== 'string') return null;
-  try {
-    if (!assertNotSymlink(filePath)) return null;
-    const st = lstatSync(filePath);
-    if (st.size > maxBytes) return null;
-    const parsed = JSON.parse(readFileSync(filePath, 'utf8'));
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
-    return parsed;
-  } catch {
-    return null;
-  }
+function randInt(min, max, randomFn) {
+  return min + Math.floor(Math.min(0.999999, Math.max(0, Number(randomFn()) || 0)) * (max - min + 1));
+}
+
+export function computeSessionThresholds(baseThreshold = 10, { dynamicEnabled = true, randomFn = Math.random } = {}) {
+  const base = clampInt(baseThreshold, dynamicEnabled ? 5 : 1, 50, 10);
+  if (!dynamicEnabled) return { baseThreshold: base, hardFloor: base, softThreshold: base, jittered: false };
+  const hardFloor = randInt(Math.max(3, base - 2), Math.min(50, base + 2), randomFn);
+  const softThreshold = randInt(Math.min(65, hardFloor + 4), Math.min(65, hardFloor + 10), randomFn);
+  return { baseThreshold: base, hardFloor, softThreshold, jittered: true };
+}
+
+export function computeNaturalPauseMs({ enabled = true, minMs = 3000, maxMs = 8000, randomFn = Math.random } = {}) {
+  return enabled ? randInt(minMs, maxMs, randomFn) : 0;
 }
 
 export function loadGuardSettings(paths) {
@@ -130,7 +120,7 @@ export function extractGeminiBuckets(summary) {
   return { weeklyBucket, fiveHourBucket };
 }
 
-export function evaluateQuotaAlert(summary, settings = DEFAULT_GUARD_SETTINGS) {
+export function evaluateQuotaAlert(summary, settings = DEFAULT_GUARD_SETTINGS, { sessionThresholds = null } = {}) {
   const cfg = normalizeGuardSettings(settings, DEFAULT_GUARD_SETTINGS);
   const { weeklyBucket, fiveHourBucket } = extractGeminiBuckets(summary);
 
@@ -146,21 +136,30 @@ export function evaluateQuotaAlert(summary, settings = DEFAULT_GUARD_SETTINGS) {
       ? Math.min(1, Math.max(0, fiveHourBucket.remainingFraction))
       : null;
 
-  const thresholdFrac = cfg.thresholdPercent / 100;
-  const triggeredBuckets = [];
-  if (cfg.watchWeekly && weeklyFraction !== null && weeklyFraction <= thresholdFrac + 1e-9) {
-    triggeredBuckets.push('gemini-weekly');
+  const hardFloor = sessionThresholds?.hardFloor ?? cfg.thresholdPercent;
+  const softThreshold = sessionThresholds?.softThreshold ?? cfg.thresholdPercent;
+  const hardBuckets = [];
+  const softBuckets = [];
+  for (const [bucketId, watched, fraction] of [
+    ['gemini-weekly', cfg.watchWeekly, weeklyFraction],
+    ['gemini-5h', cfg.watch5h, fiveHourFraction],
+  ]) {
+    if (!watched || fraction === null) continue;
+    if (fraction <= hardFloor / 100 + 1e-9) hardBuckets.push(bucketId);
+    else if (softThreshold > hardFloor && fraction <= softThreshold / 100 + 1e-9) softBuckets.push(bucketId);
   }
-  if (cfg.watch5h && fiveHourFraction !== null && fiveHourFraction <= thresholdFrac + 1e-9) {
-    triggeredBuckets.push('gemini-5h');
-  }
+  const level = hardBuckets.length ? 'hard' : softBuckets.length ? 'soft' : 'ok';
+  const triggeredBuckets = hardBuckets.length ? hardBuckets : softBuckets;
 
   return {
-    triggered: triggeredBuckets.length > 0,
+    triggered: level !== 'ok',
+    level,
     triggeredBuckets,
     weeklyPercent: roundPercent(weeklyFraction),
     fiveHourPercent: roundPercent(fiveHourFraction),
     thresholdPercent: cfg.thresholdPercent,
+    softThresholdPercent: softThreshold,
+    hardFloorPercent: hardFloor,
   };
 }
 
@@ -214,6 +213,9 @@ export function pickBestBackupAccount(
         maskedEmail: acc.maskedEmail || (acc.email ? maskEmail(acc.email) : ''),
         label: sanitizeText(acc.label || '', 40),
         tierName: sanitizeText(acc.tierName || '', 64),
+        estimatedReset: Boolean(rawUsage?.estimatedAnyReset || weeklyBucket?.estimatedReset || fiveHourBucket?.estimatedReset),
+        capturedAt: sanitizeText(rawUsage?.capturedAt || '', 64),
+        source: sanitizeText(rawUsage?.source || 'snapshot', 24),
         weeklyPercent: roundPercent(w),
         fiveHourPercent: roundPercent(h),
       },
@@ -235,6 +237,9 @@ function sanitizeCandidateSnapshot(cand) {
   }
   return {
     id: cand.id,
+    estimatedReset: Boolean(cand.estimatedReset),
+    capturedAt: sanitizeText(cand.capturedAt || '', 64),
+    source: sanitizeText(cand.source || 'snapshot', 24),
     maskedEmail: sanitizeText(cand.maskedEmail || '', 120),
     label: sanitizeText(cand.label || '', 40),
     tierName: sanitizeText(cand.tierName || '', 64),
@@ -244,65 +249,68 @@ function sanitizeCandidateSnapshot(cand) {
   };
 }
 
-export function writeQuotaAlertSnapshot(paths, snapshot = {}) {
-  if (!paths?.quotaAlertPath) {
-    throw new Error('MISSING_QUOTA_ALERT_PATH');
-  }
-  const settings = normalizeGuardSettings(snapshot.settings, DEFAULT_GUARD_SETTINGS);
+function normalizeAlertSnapshot(snapshot) {
+  const settings = normalizeGuardSettings(snapshot.settings);
   const triggeredBuckets = Array.isArray(snapshot.triggeredBuckets)
     ? snapshot.triggeredBuckets.filter((b) => b === 'gemini-weekly' || b === 'gemini-5h')
     : [];
-  const payload = {
+  const triggered = Boolean(snapshot.triggered && triggeredBuckets.length);
+  const level = triggered ? (snapshot.level === 'soft' ? 'soft' : 'hard') : 'ok';
+  const thresholdPercent = clampInt(snapshot.thresholdPercent, 1, 50, settings.thresholdPercent);
+  const hardFloorPercent = clampInt(snapshot.hardFloorPercent, 1, 50, thresholdPercent);
+  return {
     v: 1,
-    updatedAt:
-      typeof snapshot.updatedAt === 'string' && Number.isFinite(Date.parse(snapshot.updatedAt))
-        ? snapshot.updatedAt
-        : new Date().toISOString(),
+    updatedAt: typeof snapshot.updatedAt === 'string' && Number.isFinite(Date.parse(snapshot.updatedAt)) ? snapshot.updatedAt : '',
     activeAccountId: typeof snapshot.activeAccountId === 'string' ? snapshot.activeAccountId : '',
     activeMaskedEmail: sanitizeText(snapshot.activeMaskedEmail || '', 120),
     activeTierName: sanitizeText(snapshot.activeTierName || '', 64),
-    triggered: Boolean(snapshot.triggered && triggeredBuckets.length > 0),
+    triggered,
+    level,
     triggeredBuckets,
-    weeklyPercent:
-      typeof snapshot.weeklyPercent === 'number' && Number.isFinite(snapshot.weeklyPercent)
-        ? snapshot.weeklyPercent
-        : null,
-    fiveHourPercent:
-      typeof snapshot.fiveHourPercent === 'number' && Number.isFinite(snapshot.fiveHourPercent)
-        ? snapshot.fiveHourPercent
-        : null,
-    thresholdPercent: clampInt(snapshot.thresholdPercent, 1, 50, settings.thresholdPercent),
+    weeklyPercent: Number.isFinite(snapshot.weeklyPercent) ? snapshot.weeklyPercent : null,
+    fiveHourPercent: Number.isFinite(snapshot.fiveHourPercent) ? snapshot.fiveHourPercent : null,
+    thresholdPercent,
+    softThresholdPercent: clampInt(snapshot.softThresholdPercent, hardFloorPercent, 65, Math.max(hardFloorPercent, thresholdPercent)),
+    hardFloorPercent,
     settings,
     bestCandidate: sanitizeCandidateSnapshot(snapshot.bestCandidate),
   };
+}
 
+export function writeQuotaAlertSnapshot(paths, snapshot = {}) {
+  if (!paths?.quotaAlertPath) throw new Error('MISSING_QUOTA_ALERT_PATH');
+  const payload = normalizeAlertSnapshot(snapshot);
+  if (!payload.updatedAt) payload.updatedAt = new Date().toISOString();
   atomicWriteFile(paths.quotaAlertPath, JSON.stringify(payload, null, 2) + '\n', 0o600);
   return payload;
 }
 
 export function readQuotaAlertSnapshot(paths) {
   const parsed = readSafeJsonFile(paths?.quotaAlertPath, MAX_GUARD_JSON_BYTES);
-  if (!parsed || parsed.v !== 1) return null;
-  return {
+  return parsed?.v === 1 ? normalizeAlertSnapshot(parsed) : null;
+}
+
+export function readQuotaRefreshTrigger(paths) {
+  const trigger = readSafeJsonFile(paths.quotaTriggerPath, MAX_GUARD_JSON_BYTES);
+  return trigger?.v === 1 && typeof trigger.requestedAt === 'string' && Number.isFinite(Date.parse(trigger.requestedAt))
+    ? trigger : null;
+}
+
+export function writeQuotaRefreshTrigger(paths, {
+  event = 'PostInvocation', conversationId = '', minIntervalMs = 60_000, nowMs = Date.now(),
+} = {}) {
+  const previous = readQuotaRefreshTrigger(paths);
+  if (previous && nowMs - Date.parse(previous.requestedAt) < minIntervalMs) {
+    return { written: false, throttled: true };
+  }
+  const trigger = {
     v: 1,
-    updatedAt: typeof parsed.updatedAt === 'string' ? parsed.updatedAt : '',
-    activeAccountId: typeof parsed.activeAccountId === 'string' ? parsed.activeAccountId : '',
-    activeMaskedEmail: sanitizeText(parsed.activeMaskedEmail || '', 120),
-    activeTierName: sanitizeText(parsed.activeTierName || '', 64),
-    triggered: Boolean(parsed.triggered),
-    triggeredBuckets: Array.isArray(parsed.triggeredBuckets)
-      ? parsed.triggeredBuckets.filter((b) => b === 'gemini-weekly' || b === 'gemini-5h')
-      : [],
-    weeklyPercent:
-      typeof parsed.weeklyPercent === 'number' && Number.isFinite(parsed.weeklyPercent) ? parsed.weeklyPercent : null,
-    fiveHourPercent:
-      typeof parsed.fiveHourPercent === 'number' && Number.isFinite(parsed.fiveHourPercent)
-        ? parsed.fiveHourPercent
-        : null,
-    thresholdPercent: clampInt(parsed.thresholdPercent, 1, 50, DEFAULT_GUARD_SETTINGS.thresholdPercent),
-    settings: normalizeGuardSettings(parsed.settings, DEFAULT_GUARD_SETTINGS),
-    bestCandidate: sanitizeCandidateSnapshot(parsed.bestCandidate),
+    event: sanitizeText(event, 64),
+    conversationId: sanitizeText(conversationId, 128),
+    requestedAt: new Date(nowMs).toISOString(),
   };
+  atomicWriteFile(paths.quotaTriggerPath, JSON.stringify(trigger) + '\n', 0o600);
+  return { written: true, throttled: false };
 }
 
 function defaultIsPidAlive(pid) {

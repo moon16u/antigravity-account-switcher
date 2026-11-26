@@ -7,7 +7,7 @@ English | [简体中文](README.zh-CN.md) | [Changelog](CHANGELOG.md)
 ![Node.js >= 18](https://img.shields.io/badge/Node.js-%3E%3D%2018-339933)
 ![Zero Dependencies](https://img.shields.io/badge/Dependencies-0-brightgreen)
 
-A cross-platform auxiliary-pane sidecar plugin (`SIDECAR_UI_ENTRYPOINT_AUX_PANE`) for **Google Antigravity 2.0** that manages multiple local OAuth accounts, encrypts credentials at rest, displays per-account quota usage, and switches accounts cleanly across desktop and WSL2 environments — built on **Node.js >= 18** with **zero external npm dependencies**.
+A cross-platform auxiliary-pane sidecar plugin (`SIDECAR_UI_ENTRYPOINT_AUX_PANE`) for **Google Antigravity 2.0** that manages multiple local accounts with a low-risk, local-first architecture: official native Google sign-in, AES-256-GCM encrypted credentials at rest, local quota snapshots with reset projection, and clean account switching across desktop and WSL2 environments — built on **Node.js >= 18** with **zero external npm dependencies**, **zero outbound remote API calls**, and **zero idle polling**.
 
 <p align="center">
   <img src="assets/demo.gif" alt="Antigravity Account Switcher Demo" width="560" />
@@ -24,46 +24,50 @@ A cross-platform auxiliary-pane sidecar plugin (`SIDECAR_UI_ENTRYPOINT_AUX_PANE`
 
 ## Features
 
-- **Current Account Inspection & Masked Display**: Reads the active session token from OS Keyring on **macOS** (Keychain `gemini`/`antigravity`) and **Linux desktop** (Secret Service via `secret-tool` when `DBUS_SESSION_BUS_ADDRESS` is set), or from `~/.gemini/jetski-standalone-oauth-token` on **WSL2** and non-keyring environments. On **native Windows** (zero background PowerShell subprocesses), combines `LanguageServerService/GetUserStatus` with the encrypted vault to show active sign-in status cleanly and relies on **`+ Add Account`** to enroll accounts. Emails are masked by default with a one-click header toggle to reveal full addresses.
-- **No-Logout Browser OAuth Addition (`+ Add Account`)**:
-  - Dynamically extracts the official OAuth client configuration at runtime from your local Antigravity `language_server` / `language_server.exe` binary (**ELF64**, **PE64**, and single/Universal Fat **Mach-O 64-bit** — zero client secrets stored in this repository).
-  - Runs a Google OAuth 2.0 **PKCE S256** flow with a `127.0.0.1:0` loopback callback, single-use constant-time (`timingSafeEqual`) `state` verification, and a 5-minute TTL.
-  - Displays a copyable authorization URL so you can sign in inside an incognito window or another browser profile without signing out of your active Antigravity session.
-  - Includes **Native Sign-in (Fallback)** in Tools for environments where browser OAuth is blocked (backs up the active account, quits the desktop app, and relaunches signed out).
-- **Non-Active Tier Sync & Per-Account `View usage` Panel**:
-  - Automatically resolves subscription tiers (`Google AI Pro`, `Google AI Ultra`, `Free`, etc.) via `v1internal:loadCodeAssist` upon browser OAuth addition, background fill for uncached accounts, and header Refresh — without switching accounts or altering last-used timestamps.
-  - Each saved account card includes a collapsible **`View usage`** panel rendering Antigravity-style quota groups and circular rings (querying local `language_server` `RetrieveUserQuotaSummary` directly for the active account with remote `v1internal:retrieveUserQuotaSummary` fallback for non-active accounts, using `antigravity/hub/<ver>` headers so advanced model groups such as Argon/Carbon stay intact).
-  - Smart caching & refresh: initial expansion after opening/reopening the sidebar honors the `30s` backend cache; re-expanding within the same session automatically refreshes when more than `10s` have elapsed since the last successful fetch (reusing loaded data within `10s`); staying expanded leaves refreshes to the manual refresh controls.
-- **Automatic HTTP Proxy Support**:
-  - Honors `HTTPS_PROXY` / `https_proxy`, `HTTP_PROXY` / `http_proxy`, and `NO_PROXY` / `no_proxy`.
-  - **Node.js >= 24.5 or >= 22.21**: Uses Node's native `https.Agent({ proxyEnv })` directly without needing `--use-env-proxy` in `sidecar.json`, keeping Node 18/20/22/24 startup uniform.
-  - **Node.js 18 / 20 / earlier 22**: Automatically falls back to the built-in `ProxyConnectAgent`, establishing an HTTP `CONNECT` tunnel (including Basic `Proxy-Authorization` credentials and `NO_PROXY` bypass matching) and upgrading to TLS >= 1.2 with strict certificate verification.
+- **Current Account Inspection & Masked Display**: Reads the active session token from OS Keyring on **macOS** (Keychain `gemini`/`antigravity`) and **Linux desktop** (Secret Service via `secret-tool` when `DBUS_SESSION_BUS_ADDRESS` is set), or from `~/.gemini/jetski-standalone-oauth-token` on **WSL2** and non-keyring environments. On **native Windows** (zero background PowerShell subprocesses), combines `LanguageServerService/GetUserStatus` with the encrypted vault to show active sign-in status cleanly, and relies on **`+ Add Account`** to enroll or add accounts through official native Google sign-in. Emails are masked by default with a one-click header toggle to reveal full addresses.
+- **Official Native Sign-In (`+ Add Account`)** — the primary and sole account addition flow:
+  - Clicking **`+ Add Account`** backs up the active session into the encrypted vault and `last-token.enc.json`, removes the active token, and restarts Antigravity signed out.
+  - Complete the official Google sign-in in the Antigravity window itself; back in the panel, click **`Save Account`** to capture and encrypt the new session into the vault.
+  - No browser OAuth or PKCE callback, no local OAuth listener, no runtime binary OAuth client extraction, no client secrets, and no remote token exchange. The plugin never asks for passwords, OAuth codes, or token files.
+- **Local-First Quota Snapshots & Per-Account `View usage`**:
+  - **Only the active account** queries the local `language_server` RPC (`RetrieveUserQuotaSummary`) through a loopback-only connection. Normalized summaries are cached in `quota-snapshots.json` per account UUID; before a switch, the outgoing account's final snapshot is force-captured on a best-effort basis before its token is replaced.
+  - **Inactive accounts** render their last local snapshot. When a bucket's `resetTime` has already passed, it is projected to 100% and labeled **`Estimated reset`** / **`Est. 100%`**; snapshots older than **24 hours** show **`Snapshot >24h old · syncs on switch`**, and accounts without a snapshot show a local-capture hint. No remote requests are made for any of this.
+  - Each saved account card includes a collapsible **`View usage`** panel rendering Antigravity-style quota groups and circular rings. Subscription tier labels are kept from the local `language_server` status and snapshots when available.
+  - Smart caching & refresh: initial expansion after opening/reopening the sidebar honors the `30s` backend cache; re-expanding within the same session automatically refreshes when more than `10s` have elapsed since the last successful fetch (reusing loaded data within `10s`); staying expanded leaves refreshes to the manual refresh controls, with no automatic polling.
+- **Zero Outbound Remote API Calls, Zero Binary Extraction, Zero Idle Polling**:
+  - The plugin makes **no direct remote Google API calls**: no remote tier lookups, no remote quota-summary requests, no custom hub-version User-Agent, no Cloud Code host whitelist, and no CONNECT-tunnel proxy transport.
+  - There is **no runtime binary OAuth client extraction** and **no self-hosted browser PKCE OAuth flow**; the related extractor, OAuth manager, remote-call modules, API routes, and tier-sync endpoint were removed in 0.4.0.
+  - There is **no `setInterval` background quota poll**. Quota refresh is driven by conversation lifecycle events, account capture, manual usage refresh, and pre-switch capture. The only HTTP client path is the local `language_server` RPC, restricted to loopback hosts (`localhost`, `127.0.0.1`, `::1`) and authenticated with the host-provided CSRF token.
 - **AES-256-GCM Encrypted Vault**:
   - Encrypts saved accounts (`vault.enc.json`), automatic pre-switch active-token backups (`last-token.enc.json`), and single-use switch jobs (`jobs/job-<uuid>.enc.json`) with a local 256-bit random master key (`vault.key`).
   - Enforces `0700` directory permissions and `0600` file permissions on Unix (WSL2, macOS, and Linux).
 - **Keep In Menu Bar Adaptive Fast Shutdown & Relaunch**:
   - Executes switches in a detached worker (`switcher-worker.mjs`: pure Node.js double-fork `--detach-worker` on native Windows outside the `Antigravity.exe` tree, or `systemd-run --user --scope` on Linux/WSL2 when available — zero hidden `powershell.exe` calls).
   - On **Windows / WSL2**, reads `app_storage.json` (`runInBackground` — Antigravity's *Keep In Menu Bar* setting) and inspects `tasklist /V /FO CSV` to identify visible main `Antigravity.exe` windows, closes them first before cleaning up tray processes (native Windows omits `/T`), and signals WSL2 `language_server` (`SIGTERM`) to flush cleanly. On native Windows, clears the active `gemini:antigravity` Credential Manager entry via `cmdkey.exe` and writes `~/.gemini/jetski-standalone-oauth-token` (which `language_server.exe` imports on startup), then relaunches via `%APPDATA%\Antigravity\launch-env-proxy.vbs` (optional proxy wrapper if present), `Antigravity.exe`, or `ANTIGRAVITY_SWITCHER_RELAUNCH_EXE`.
-  - On **macOS**, quits cleanly via `/usr/bin/osascript` (`SIGTERM` fallback) and relaunches via `/usr/bin/open -a`.
-  - On **Linux**, terminates desktop and `language_server` processes via `SIGTERM` and relaunches the captured desktop binary.
+  - On **macOS**, quits cleanly via `/usr/bin/osascript` (`SIGTERM` fallback) and relaunches via `/usr/bin/open -a`. On **Linux**, terminates desktop and `language_server` processes via `SIGTERM` and relaunches the captured desktop binary.
+  - Adds a **natural relaunch pause** (random `3–8s` before relaunch, `naturalPauseEnabled`, default on) so the restart does not look mechanically instant.
 - **Pre-Switch Active-Work Guard & Bilingual UI (`中 / EN`)**:
   - Checks `GetAllCascadeTrajectories`, `ListBackgroundTasks`, and `ListTerminals` via `language_server` RPC plus active user child processes before switching; pauses with **Recheck & Switch**, **Cancel**, or audited **Force Switch** (`FORCE_SWITCH_REQUESTED` in `switch.log`) when work is running.
   - Built-in instant **`中 / EN`** toggle switches all in-panel UI copy immediately.
-- **Agent MCP Tools, Low-Quota Hook Alert & Optional Auto-Resume**:
-  - Bundles a zero-dependency stdio MCP server (`mcp_config.json` -> `scripts/mcp-server.mjs`) exposing `get_switcher_status`, `list_accounts`, `get_quota`, and `switch_account` (with a matching `/switch-account` skill in `skills/switch-account/SKILL.md`).
-  - Sidecar polls the active account's Gemini **Weekly** and **5-Hour** quota in the background (every `60s`) and writes a sanitized snapshot (`quota-alert.json`). A lightweight `PreInvocation` hook (`hooks.json` -> `scripts/quota-hook.mjs`, automatically falling back on Windows to Antigravity's bundled `%APPDATA%\Antigravity\bin\agy-node.cmd` if `node` is missing from `PATH`) reads the local snapshot in milliseconds with zero resident RAM and injects a deduplicated `systemMessage` into the running agent loop when either bucket drops to the configured threshold (default `10%`).
-  - In Tools → **Agent Auto-Switch & Quota Alert**, you can configure the threshold (`1%–50%`), toggle Weekly / 5h monitoring, opt in to **Allow Agent auto-switch on low quota** (safely blocked if any other conversation/task/terminal is active), and opt in to **Auto-resume current conversation after restart**. When switching, the worker smartly waits for the current turn to wrap up cleanly before quitting the app, syncs `app_storage.json` on relaunch to skip redundant `One last thing` prompts, and sends `agentapi send-message` once the new hub and MCP tools are ready.
+- **Agent MCP Tools & Event-Driven Quota Guard**:
+  - Bundles a zero-dependency stdio MCP server (`mcp_config.json` → `scripts/mcp-server.mjs`, server version `0.4.0`) exposing `get_switcher_status`, `list_accounts`, `get_quota`, and `switch_account`, with a matching `/switch-account` skill in `skills/switch-account/SKILL.md`. `get_quota` reads live local `language_server` quota for the active account and local snapshots plus reset projection for inactive accounts; `switch_account` (`pickBest: true`) selects from local snapshots with a least-recently-used unsnapshotted fallback and captures a pre-switch snapshot.
+  - The conversation lifecycle drives quota checks: the **`PostInvocation`** hook (`hooks.json` → `scripts/quota-hook.mjs`) writes a throttled local trigger file (`quota-refresh-trigger.json`), which the Sidecar watches with `fs.watch` and coalesces. The Sidecar then queries only the active account's local `language_server` RPC and writes a sanitized `quota-alert.json`. There is no idle heartbeat polling, and the hook returns immediately without network or RPC calls (Windows automatically falls back to Antigravity's bundled `%APPDATA%\Antigravity\bin\agy-node.cmd` if `node` is missing from `PATH`).
+  - The **`PreInvocation`** hook reads the local snapshot in milliseconds with zero resident RAM and injects a level-aware, deduplicated `systemMessage`: **`soft`** = wrap-up reminder as quota enters the soft threshold, **`hard`** = switch prompt at the hard floor. Deduplication is per conversation and per level, so a `soft` alert can later escalate to `hard` while duplicate same-level alerts stay quiet.
+  - In Tools → **Advanced Settings**, you can configure the base threshold (panel dropdown `10%–50%`), toggle Weekly / 5h monitoring, enable the **dynamic threshold range** (`dynamicThresholdEnabled`, default on: a per-session jittered soft wrap-up threshold plus a jittered hard floor), enable the **natural relaunch pause** (`naturalPauseEnabled`, default on), opt in to **Allow Agent auto-switch on low quota** (safely blocked if any other conversation/task/terminal is active), and opt in to **Auto-resume current conversation after restart**.
+  - The **Advanced Settings** panel uses concise setting titles, with info and risk explanations shown only on hover through `ⓘ` tooltips, and right-aligned instant **On / Off** toggle buttons consistent with the Saved Accounts action controls.
+  - The **Advanced Settings** panel also exposes the opt-in **`skipOnboardingPrompt`** toggle (**default OFF**). When enabled, `switcher-worker` may update `app_storage.json` (`agy.onboarding.lastLoginUsername`) only when a prior acceptance marker exists, to skip repeated onboarding modals on later switches.
+  - Agent-initiated switches that carry a `conversationId` wait for the current turn to wrap up cleanly (bounded) before quitting; auto-resume can send `agentapi send-message` once the new hub and MCP tools are ready.
 
 ## Scope, Boundaries & Known Limitations
 
 1. **Consumer Accounts Only**: Only personal Google accounts (`auth_method: "consumer"`) are supported; enterprise / Google Workspace SSO tokens are rejected.
 2. **Restart Required on Switch**: Antigravity holds the active OAuth session in its running `language_server` process, so switching accounts requires quitting Antigravity, waiting for `language_server` to flush and exit, swapping credentials, and relaunching the app. Always finish or acknowledge running tasks before switching.
 3. **Platform Verification & Windows Credential Reading**:
-   - **Windows (native)** & **WSL2 + Windows host** have been verified end-to-end on real desktops. On native Windows, this plugin deliberately avoids launching hidden PowerShell/WMI commands to read Credential Manager (preventing security-suite false positives); enroll accounts already signed in on Windows once via **`+ Add Account`**.
+   - **Windows (native)** & **WSL2 + Windows host** have been verified end-to-end on real desktops. On native Windows, this plugin deliberately avoids launching hidden PowerShell/WMI commands to read Credential Manager (preventing security-suite false positives); enroll or add accounts through **`+ Add Account`** and the official native Google sign-in.
    - **Linux (desktop)** & **macOS** pass full unit/integration CI suites (`ubuntu-latest`, `macos-latest`), while physical macOS desktop GUI switching has not yet been manually tested on real Apple hardware — issue reports and PRs from macOS users are very welcome.
-4. **Local Binary Extraction Dependency**: Zero OAuth client secrets are bundled; the plugin extracts client credentials at runtime from your local `language_server` binary. If a future Antigravity update moves the binary or changes its compiled layout, set `ANTIGRAVITY_AGENTAPI_EXE` or use **`Native Sign-in (Fallback)`**.
+4. **Native Sign-In Only, No Browser OAuth Fallback**: Account addition depends on the official Antigravity / Google sign-in flow. There is no browser OAuth fallback, no PKCE loopback listener, and no runtime binary extraction in 0.4.0; if Google sign-in is blocked in your environment, the plugin cannot add that account. `ANTIGRAVITY_AGENTAPI_EXE` only overrides executable discovery for local RPC / relaunch and is not used for OAuth client extraction.
 5. **Static Manifest Display Name**: Antigravity's `plugin.json` and `sidecar.json` currently accept static strings only (no OS-locale manifest switching), so the Plugins manager entry and side-pane tab always display **`Account Switcher`**, while all content inside the panel supports **`中 / EN`** switching.
-6. **Quota & Tier Endpoints**: Tier sync and non-active quota views depend on Google Cloud Code endpoints (`v1internal:loadCodeAssist`, `v1internal:retrieveUserQuotaSummary`, `30 req/min` rate limit). Upstream API changes or proxy network errors may prevent tier/quota updates while leaving local account switching unaffected.
+6. **Inactive Quota Values Are Local Estimates**: Inactive accounts show the last local snapshot with reset-time projection, not live usage. A bucket past its `resetTime` is optimistically projected to 100%, and snapshots older than 24 hours are marked stale. Actual calibration happens only after switching to that account and querying the active local `language_server`; there is intentionally no remote quota endpoint or background sync.
 7. **Independent Community Project**: This is an independent open-source plugin and is not affiliated with or endorsed by Google. All credentials remain encrypted locally on your machine.
 
 ## Requirements
@@ -131,10 +135,9 @@ A cross-platform auxiliary-pane sidecar plugin (`SIDECAR_UI_ENTRYPOINT_AUX_PANE`
 
 | Variable | Purpose |
 | --- | --- |
-| `HTTPS_PROXY` / `HTTP_PROXY` / `NO_PROXY` | HTTP proxy and bypass rules for Google OAuth token exchange and Cloud Code requests (lowercase variants also supported). |
 | `ANTIGRAVITY_SWITCHER_RELAUNCH_EXE` | Custom executable path (or `.vbs` launcher on Windows/WSL2) used to relaunch Antigravity after switching. |
-| `ANTIGRAVITY_AGENTAPI_EXE` | Overrides the `language_server` binary path used for OAuth client extraction (also used on macOS to locate the `.app` bundle). |
-| `ANTIGRAVITY_APP_STORAGE_PATH` | Overrides the path to `app_storage.json` (`runInBackground` detection). |
+| `ANTIGRAVITY_AGENTAPI_EXE` | Overrides the `language_server` / `agentapi` executable path used for local RPC, auto-resume, and macOS `.app` relaunch discovery. Not used for OAuth client extraction in 0.4.0. |
+| `ANTIGRAVITY_APP_STORAGE_PATH` | Overrides the path to `app_storage.json` (`runInBackground` detection and opt-in onboarding sync). |
 | `ANTIGRAVITY_WIN_APPDATA` / `ANTIGRAVITY_WIN_LOCALAPPDATA` | Overrides Windows `%APPDATA%` / `%LOCALAPPDATA%` discovery under WSL2 when Windows interop or `PATH` inference is unavailable. |
 | `ANTIGRAVITY_GEMINI_DIR` / `ANTIGRAVITY_EXECUTABLE_DATA_DIR` | Overrides `~/.gemini` and the encrypted sidecar data directory. |
 
@@ -144,41 +147,41 @@ Runtime data is completely separated from plugin source files. Under Antigravity
 
 - `vault.key` — Randomly generated 256-bit AES master key (`0600` on Unix)
 - `vault.enc.json` — AES-256-GCM encrypted account vault (`0600` on Unix)
-- `last-token.enc.json` — AES-256-GCM encrypted backup of the active token captured before switching (`0600` on Unix)
+- `last-token.enc.json` — AES-256-GCM encrypted backup of the active token captured before switching or native re-login (`0600` on Unix)
 - `jobs/job-<uuid>.enc.json` — Single-use encrypted switch job deleted immediately upon worker pickup
 - `switch.log` — Sanitized audit and diagnostic log (masked emails and error codes only; never logs tokens or secrets)
-- `settings.json` — Quota guard and Agent auto-switch / auto-resume preferences (`0600` on Unix)
+- `settings.json` — Quota guard, dynamic threshold, natural pause, onboarding sync, and Agent auto-switch / auto-resume preferences (`0600` on Unix)
+- `quota-snapshots.json` — Local per-account quota summary cache used for reset projection and inactive-account rendering (`0600` on Unix)
 - `quota-alert.json` — Sanitized active-account quota alert snapshot and best healthy backup candidate
-- `hook-alert-state.json` — Per-conversation `PreInvocation` hook deduplication state
+- `quota-refresh-trigger.json` — Throttled `PostInvocation` trigger watched by the Sidecar via `fs.watch`
+- `hook-alert-state.json` — Per-conversation, per-level `PreInvocation` hook deduplication state
 
 ## Security Architecture
 
-- **Token Gate & Rate Limiting**: All API endpoints require the host-injected `ANTIGRAVITY_SIDECAR_UI_TOKEN` (`403` when absent) and enforce sliding-window rate limits (`60 req/min` reads, `10 req/min` writes, `30 req/min` tier/usage queries) plus a `15s` switch lock.
+- **Token Gate & Rate Limiting**: All API endpoints require the host-injected `ANTIGRAVITY_SIDECAR_UI_TOKEN` (`403` when absent) and enforce sliding-window rate limits (`60 req/min` reads, `10 req/min` writes, `30 req/min` usage queries) plus a `15s` switch lock.
 - **Strict CSP & DOM-Safe Frontend**: Responses include `Content-Security-Policy` (`default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'self'`), `X-Content-Type-Options: nosniff`, `Cache-Control: no-store`, `Referrer-Policy: no-referrer`, and `Permissions-Policy`. The web UI uses `textContent` and DOM builders exclusively (no `innerHTML`, `eval`, or inline scripts/styles).
 - **Cryptographic Integrity (Fail-Closed)**: Every encrypted envelope uses AES-256-GCM with a unique 12-byte IV and 16-byte authentication tag; any tampering rejects decryption.
 - **Filesystem & Process Hardening**: Rejects symlinks (`lstatSync`) on sensitive files and directories, enforces path-boundary containment (`assertInsideDir`), writes atomically via temp file + `renameSync`, validates UUIDs, strips prototype-pollution keys (`__proto__`, `constructor`, `prototype`), and invokes child processes strictly with argument arrays (`execFileSync` / `spawn`, never `shell: true`). Active-process inspection logs only executable basename + PID to avoid exposing command-line arguments.
-- **OAuth & Cloud Code Hardening**: Extracts client credentials dynamically from the local signed binary, enforces PKCE S256 + `crypto.timingSafeEqual` single-use `state`, binds callback only on `127.0.0.1:0` with immediate listener teardown, serves static `default-src 'none'` callback pages, enforces TLS >= 1.2 (`rejectUnauthorized: true`), and restricts outbound HTTPS requests strictly to `oauth2.googleapis.com`, `www.googleapis.com`, `daily-cloudcode-pa.googleapis.com`, and `cloudcode-pa.googleapis.com`.
+- **Local-Only Network & OAuth Surface**: The plugin opens no outbound HTTPS connections to Google APIs, runs no OAuth token exchange, and hosts no OAuth callback listener. The only HTTP client path is the local `language_server` RPC, restricted to loopback hosts with the host-provided CSRF token. Hooks perform no network or RPC calls: `PostInvocation` only writes a throttled trigger file, and `PreInvocation` only reads local snapshots/settings and updates local deduplication state. Credential extraction, browser PKCE, remote tier sync, and remote quota calls are absent by design.
 
 ## Repository Structure
 
 - `plugin.json` — Plugin manifest (`antigravity-account-switcher`, display name `Account Switcher`)
 - `mcp_config.json` — Bundled stdio MCP server declaration (`switcher`)
-- `hooks.json` — Bundled `PreInvocation` low-quota hook declaration (`quota-guard`)
-- `scripts/mcp-server.mjs` — Zero-dependency MCP server exposing account status, quota, and safe switch tools
-- `scripts/quota-hook.mjs` — Lightweight short-lived `PreInvocation` hook reading local quota snapshots
+- `hooks.json` — Bundled `PreInvocation` and `PostInvocation` quota-guard hook declarations (`quota-guard`)
+- `scripts/mcp-server.mjs` — Zero-dependency MCP server (`0.4.0`) exposing account status, local-snapshot quota, and safe switch tools
+- `scripts/quota-hook.mjs` — Short-lived event-driven hook: level-aware `PreInvocation` alert and throttled `PostInvocation` trigger
 - `skills/switch-account/SKILL.md` — `/switch-account` skill workflow for Antigravity Agents
 - `assets/logo.svg` — Plugin icon
 - `sidecars/switcher/sidecar.json` — Sidecar entrypoint (`command: "node"`, `args: ["main.mjs"]`, `SIDECAR_UI_ENTRYPOINT_AUX_PANE`)
-- `sidecars/switcher/main.mjs` — Sidecar HTTP server, API routes, background quota polling, security gates, and rate limiting
-- `sidecars/switcher/quota-guard.mjs` — Quota threshold evaluation, best-backup selection, guard settings, and live hub discovery
-- `sidecars/switcher/platform.mjs` — Cross-platform runtime detection, path translation, binary discovery, browser launch, and Antigravity relaunch
-- `sidecars/switcher/binary-oauth.mjs` — ELF64, PE64, and Mach-O 64-bit / Universal Fat binary OAuth client extractor
-- `sidecars/switcher/oauth.mjs` — PKCE S256 loopback OAuth manager & dual-mode proxy HTTPS client
-- `sidecars/switcher/cloudcode.mjs` — Subscription tier sync (`loadCodeAssist`), quota summary retrieval (`retrieveUserQuotaSummary` / local LS), and OAuth token refresh helper
+- `sidecars/switcher/main.mjs` — Sidecar HTTP server, API routes, local quota refresh via `fs.watch`, security gates, and rate limiting
+- `sidecars/switcher/quota-guard.mjs` — Quota threshold evaluation (soft/hard), best-backup selection, guard settings, dynamic thresholds, natural pause, and live hub discovery
+- `sidecars/switcher/quota-snapshots.mjs` — Local quota snapshot cache, active-account `language_server` query, reset-time projection, and >24h staleness detection
+- `sidecars/switcher/platform.mjs` — Cross-platform runtime detection, path translation, `language_server` / `agentapi` discovery, onboarding sync, and Antigravity relaunch
 - `sidecars/switcher/vault.mjs` — AES-256-GCM vault, atomic file writes, symlink/boundary guards, and token normalization
 - `sidecars/switcher/token-store.mjs` — Cross-platform token store (macOS Keychain & Linux Secret Service keyring, Windows `cmdkey.exe` + file handoff, and WSL2 file store)
-- `sidecars/switcher/active-work.mjs` — Pre-switch RPC and user child-process detector
-- `sidecars/switcher/switcher-worker.mjs` — Detached switch and desktop restart worker
+- `sidecars/switcher/active-work.mjs` — Pre-switch RPC (loopback-only) and user child-process detector
+- `sidecars/switcher/switcher-worker.mjs` — Detached switch, native re-login, and desktop restart worker
 - `sidecars/switcher/public/` — Auxiliary-pane web UI (`index.html`, `app.js`, `styles.css`)
 - `sidecars/switcher/test/` — Isolated unit and integration test suites (`switcher.test.mjs`, `mcp-and-hook.test.mjs`)
 - `CHANGELOG.md` / `CHANGELOG.zh-CN.md` — Bilingual release changelog (English / Simplified Chinese)
@@ -189,12 +192,6 @@ Run the test suite on Node.js >= 18:
 
 ```bash
 node --test sidecars/switcher/test/switcher.test.mjs sidecars/switcher/test/mcp-and-hook.test.mjs
-```
-
-On Node.js >= 24.5, also verify native proxy mode with `--use-env-proxy`:
-
-```bash
-node --use-env-proxy --test sidecars/switcher/test/switcher.test.mjs sidecars/switcher/test/mcp-and-hook.test.mjs
 ```
 
 Run syntax checks across all `.mjs` modules and frontend script:

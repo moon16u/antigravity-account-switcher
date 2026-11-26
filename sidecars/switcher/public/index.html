@@ -33,7 +33,7 @@
           <h2 id="saved-heading" class="card-title">已保存账号</h2>
           <span id="saved-count" class="count-badge">0</span>
         </div>
-        <button id="oauth-toggle-btn" type="button" class="btn btn-primary">+ 添加账号</button>
+        <button id="add-account-btn" type="button" class="btn btn-primary" aria-controls="new-login-confirm" aria-expanded="false">+ 添加账号</button>
       </div>
 
       <div id="unsaved-banner" class="unsaved-banner hidden">
@@ -51,92 +51,129 @@
         </form>
       </div>
 
-      <div id="oauth-panel" class="oauth-panel hidden">
-        <form id="oauth-form" class="inline-form" autocomplete="off">
-          <input
-            id="oauth-label"
-            type="text"
-            maxlength="40"
-            placeholder="新账号备注名（可选，如 备用1）"
-            aria-label="新账号备注名"
-            autocomplete="off"
-          >
-          <button id="oauth-start-btn" type="submit" class="btn btn-primary">浏览器授权添加</button>
-          <button id="oauth-hide-btn" type="button" class="btn btn-ghost">收起</button>
-        </form>
-
-        <div id="oauth-pending-box" class="confirm-box hidden">
-          <div id="oauth-pending-msg"></div>
-          <input
-            id="oauth-url-preview"
-            type="text"
-            readonly
-            class="url-preview hidden"
-            aria-label="Google OAuth 授权链接"
-          >
-          <div class="confirm-actions">
-            <a id="oauth-link" class="btn btn-primary hidden" target="_blank" rel="noopener noreferrer">打开授权页</a>
-            <button id="oauth-copy-btn" type="button" class="btn btn-secondary">复制授权链接</button>
-            <button id="oauth-cancel-btn" type="button" class="btn btn-ghost">取消授权</button>
-          </div>
-        </div>
-      </div>
+      <div id="new-login-confirm" class="confirm-box hidden"></div>
 
       <div id="accounts-list" class="accounts-list"></div>
     </section>
 
-    <section class="card tools-card" aria-label="高级工具">
+    <section id="tools-card" class="card tools-card" aria-label="高级工具">
       <details id="agent-guard-details" class="tool-item">
-        <summary id="guard-summary" class="tool-summary">Agent 自动切号与低额度提醒</summary>
+        <summary id="guard-summary" class="tool-summary">高级设置</summary>
         <div class="tool-body">
-          <form id="guard-settings-form" class="guard-form" autocomplete="off">
-            <label class="guard-check">
-              <input id="guard-alert-enabled" type="checkbox">
-              <span id="guard-alert-label">启用低额度实时提醒</span>
-            </label>
-            <label class="guard-check">
-              <input id="guard-watch-weekly" type="checkbox">
-              <span id="guard-watch-weekly-label">监控 Gemini 周额度</span>
-            </label>
-            <label class="guard-check">
-              <input id="guard-watch-5h" type="checkbox">
-              <span id="guard-watch-5h-label">监控 Gemini 5 小时额度</span>
-            </label>
-            <label class="guard-threshold-row">
-              <span id="guard-threshold-label">触发阈值（剩余百分比 ≤）</span>
-              <select id="guard-threshold" class="guard-select" aria-label="触发阈值">
+          <div id="guard-settings-form" class="guard-list">
+            <div class="guard-row">
+              <div class="guard-row-label">
+                <span id="guard-alert-label">低额度实时提醒</span>
+                <span class="info-tip">
+                  <button type="button" class="info-tip-btn" aria-label="设置说明" aria-describedby="guard-alert-tip"></button>
+                  <span id="guard-alert-tip" class="info-tip-popover" role="tooltip">低风险：仅在对话进行时检查额度，空闲时不发起请求。</span>
+                </span>
+              </div>
+              <div id="guard-alert-enabled" class="guard-segmented" role="radiogroup" aria-labelledby="guard-alert-label">
+                <button type="button" class="guard-seg-btn" role="radio" aria-checked="true" tabindex="0" data-value="false" disabled>关闭</button>
+                <button type="button" class="guard-seg-btn" role="radio" aria-checked="false" tabindex="-1" data-value="true" disabled>开启</button>
+              </div>
+            </div>
+            <div class="guard-row">
+              <div class="guard-row-label">
+                <span id="guard-watch-weekly-label">监控 Gemini 周额度</span>
+              </div>
+              <div id="guard-watch-weekly" class="guard-segmented" role="radiogroup" aria-labelledby="guard-watch-weekly-label">
+                <button type="button" class="guard-seg-btn" role="radio" aria-checked="true" tabindex="0" data-value="false" disabled>关闭</button>
+                <button type="button" class="guard-seg-btn" role="radio" aria-checked="false" tabindex="-1" data-value="true" disabled>开启</button>
+              </div>
+            </div>
+            <div class="guard-row">
+              <div class="guard-row-label">
+                <span id="guard-watch-5h-label">监控 Gemini 5 小时额度</span>
+              </div>
+              <div id="guard-watch-5h" class="guard-segmented" role="radiogroup" aria-labelledby="guard-watch-5h-label">
+                <button type="button" class="guard-seg-btn" role="radio" aria-checked="true" tabindex="0" data-value="false" disabled>关闭</button>
+                <button type="button" class="guard-seg-btn" role="radio" aria-checked="false" tabindex="-1" data-value="true" disabled>开启</button>
+              </div>
+            </div>
+            <div class="guard-row">
+              <div class="guard-row-label">
+                <span id="guard-dynamic-threshold-label">动态阈值区间</span>
+                <span class="info-tip">
+                  <button type="button" class="info-tip-btn" aria-label="设置说明" aria-describedby="guard-dynamic-threshold-tip"></button>
+                  <span id="guard-dynamic-threshold-tip" class="info-tip-popover" role="tooltip">低风险：每次会话在基准阈值附近自动浮动，先提示收尾再进入切号，减少固定阈值特征。</span>
+                </span>
+              </div>
+              <div id="guard-dynamic-threshold" class="guard-segmented" role="radiogroup" aria-labelledby="guard-dynamic-threshold-label">
+                <button type="button" class="guard-seg-btn" role="radio" aria-checked="false" tabindex="-1" data-value="false" disabled>关闭</button>
+                <button type="button" class="guard-seg-btn" role="radio" aria-checked="true" tabindex="0" data-value="true" disabled>开启</button>
+              </div>
+            </div>
+            <div class="guard-row">
+              <div class="guard-row-label">
+                <span id="guard-natural-pause-label">切号自然停顿</span>
+                <span class="info-tip">
+                  <button type="button" class="info-tip-btn" aria-label="设置说明" aria-describedby="guard-natural-pause-tip"></button>
+                  <span id="guard-natural-pause-tip" class="info-tip-popover" role="tooltip">低风险：关闭桌面端应用并更新登录态后，随机停顿 3–8 秒再重新启动。</span>
+                </span>
+              </div>
+              <div id="guard-natural-pause" class="guard-segmented" role="radiogroup" aria-labelledby="guard-natural-pause-label">
+                <button type="button" class="guard-seg-btn" role="radio" aria-checked="false" tabindex="-1" data-value="false" disabled>关闭</button>
+                <button type="button" class="guard-seg-btn" role="radio" aria-checked="true" tabindex="0" data-value="true" disabled>开启</button>
+              </div>
+            </div>
+            <div class="guard-row">
+              <div class="guard-row-label">
+                <span id="guard-skip-onboarding-label">跳过重复条款弹窗</span>
+                <span class="info-tip">
+                  <button type="button" class="info-tip-btn" aria-label="设置说明" aria-describedby="guard-skip-onboarding-tip"></button>
+                  <span id="guard-skip-onboarding-tip" class="info-tip-popover" role="tooltip">低风险：切号时同步更新本地引导记录，减少重复弹出的条款确认窗；关闭则不改动应用配置。</span>
+                </span>
+              </div>
+              <div id="guard-skip-onboarding" class="guard-segmented" role="radiogroup" aria-labelledby="guard-skip-onboarding-label">
+                <button type="button" class="guard-seg-btn" role="radio" aria-checked="true" tabindex="0" data-value="false" disabled>关闭</button>
+                <button type="button" class="guard-seg-btn" role="radio" aria-checked="false" tabindex="-1" data-value="true" disabled>开启</button>
+              </div>
+            </div>
+            <div class="guard-row">
+              <div class="guard-row-label">
+                <span id="guard-auto-switch-label">Agent 自动切号</span>
+                <span class="info-tip">
+                  <button type="button" class="info-tip-btn" aria-label="设置说明" aria-describedby="guard-auto-switch-tip"></button>
+                  <span id="guard-auto-switch-tip" class="info-tip-popover" role="tooltip">中风险：仅在无其他并发会话或任务时自动切号；高频无人值守切换会增加账号关联风险，建议按需开启。</span>
+                </span>
+              </div>
+              <div id="guard-auto-switch" class="guard-segmented" role="radiogroup" aria-labelledby="guard-auto-switch-label">
+                <button type="button" class="guard-seg-btn" role="radio" aria-checked="true" tabindex="0" data-value="false" disabled>关闭</button>
+                <button type="button" class="guard-seg-btn" role="radio" aria-checked="false" tabindex="-1" data-value="true" disabled>开启</button>
+              </div>
+            </div>
+            <div class="guard-row">
+              <div class="guard-row-label">
+                <span id="guard-auto-resume-label">切号后自动续跑</span>
+                <span class="info-tip">
+                  <button type="button" class="info-tip-btn" aria-label="设置说明" aria-describedby="guard-auto-resume-tip"></button>
+                  <span id="guard-auto-resume-tip" class="info-tip-popover" role="tooltip">中风险：桌面端应用重启就绪后自动唤醒当前会话继续任务，建议配合 Agent 自动切号使用。</span>
+                </span>
+              </div>
+              <div id="guard-auto-resume" class="guard-segmented" role="radiogroup" aria-labelledby="guard-auto-resume-label">
+                <button type="button" class="guard-seg-btn" role="radio" aria-checked="true" tabindex="0" data-value="false" disabled>关闭</button>
+                <button type="button" class="guard-seg-btn" role="radio" aria-checked="false" tabindex="-1" data-value="true" disabled>开启</button>
+              </div>
+            </div>
+            <div class="guard-row guard-row-threshold">
+              <div class="guard-row-label">
+                <span id="guard-threshold-label">触发阈值</span>
+                <span class="info-tip">
+                  <button type="button" class="info-tip-btn" aria-label="设置说明" aria-describedby="guard-threshold-tip"></button>
+                  <span id="guard-threshold-tip" class="info-tip-popover" role="tooltip">剩余额度不高于此比例时触发提醒；开启动态阈值区间时作为浮动基准。</span>
+                </span>
+              </div>
+              <select id="guard-threshold" class="guard-select" aria-labelledby="guard-threshold-label" disabled>
                 <option value="10">10%</option>
                 <option value="20">20%</option>
                 <option value="30">30%</option>
                 <option value="40">40%</option>
                 <option value="50">50%</option>
               </select>
-            </label>
-            <label class="guard-check">
-              <input id="guard-auto-switch" type="checkbox">
-              <span id="guard-auto-switch-label">允许 Agent 低额度自动切号（仅在无其他并发会话/任务时）</span>
-            </label>
-            <label class="guard-check">
-              <input id="guard-auto-resume" type="checkbox">
-              <span id="guard-auto-resume-label">切号重启后自动唤醒当前会话续跑</span>
-            </label>
-            <div class="tool-actions">
-              <button id="guard-save-btn" type="submit" class="btn btn-primary btn-sm">保存设置</button>
             </div>
-          </form>
-        </div>
-      </details>
-
-      <details id="fallback-login-details" class="tool-item">
-        <summary id="fallback-summary" class="tool-summary">原生登录（备用）</summary>
-        <div class="tool-body">
-          <div id="fallback-desc" class="tool-desc">
-            浏览器授权受阻时可使用此方式：备份当前账号并退出桌面应用，以未登录状态重开窗口进行原生登录。
           </div>
-          <div class="tool-actions">
-            <button id="new-login-btn" type="button" class="btn btn-secondary">退出并走原生登录</button>
-          </div>
-          <div id="new-login-confirm" class="confirm-box hidden"></div>
         </div>
       </details>
 

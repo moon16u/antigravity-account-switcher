@@ -14,7 +14,6 @@ import {
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 
-const GOOGLE_AUTH_PREFIX = 'https://accounts.google.com/o/oauth2/v2/auth?';
 const MAX_APP_STORAGE_BYTES = 8 * 1024 * 1024;
 const WSL_SYSTEM32 = '/mnt/c/Windows/System32';
 const RELAUNCH_STRIP_ENV_KEYS = new Set([
@@ -375,36 +374,6 @@ export function resolveLanguageServerCandidates(env = process.env, runtime = det
   }
 
   return out;
-}
-
-export function openExternalBrowserUrl(authUrl, env = process.env, runtime = detectRuntime(env)) {
-  if (typeof authUrl !== 'string' || !authUrl.startsWith(GOOGLE_AUTH_PREFIX)) {
-    return { opened: false };
-  }
-  try {
-    if (runtime === 'win32') {
-      const dirs = resolveWindowsDirs(env, runtime);
-      const rundll = join(dirs.system32, 'rundll32.exe');
-      if (!existsSync(rundll)) return { opened: false };
-      detachChild(rundll, ['url.dll,FileProtocolHandler', authUrl], { windowsHide: true, env });
-      return { opened: true };
-    }
-    if (runtime === 'wsl') {
-      const rundll = `${WSL_SYSTEM32}/rundll32.exe`;
-      if (!existsSync(rundll)) return { opened: false };
-      detachChild(rundll, ['url.dll,FileProtocolHandler', authUrl], { env });
-      return { opened: true };
-    }
-    if (runtime === 'darwin') {
-      if (!existsSync('/usr/bin/open')) return { opened: false };
-      detachChild('/usr/bin/open', [authUrl], { env });
-      return { opened: true };
-    }
-    detachChild('xdg-open', [authUrl], { env });
-    return { opened: true };
-  } catch {
-    return { opened: false };
-  }
 }
 
 export function spawnDetachedWorker(

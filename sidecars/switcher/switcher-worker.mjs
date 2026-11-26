@@ -811,7 +811,9 @@ export async function runWorker(jobArg, env = process.env, dataDirArg = '') {
         paths,
         `TOKEN_WRITTEN target=${targetMasked} store=${written.target} keyringCleared=${written.keyringCleared ? 1 : 0}${dryRun ? ' DRY_RUN' : ''}`
       );
-      if (!dryRun) {
+      if (job.syncOnboarding !== true) {
+        appendSwitchLog(paths, 'ONBOARDING_SYNC skipped=disabled');
+      } else if (!dryRun) {
         const onboardingSync = syncOnboardingLastLoginUsername(job.targetEmail, effectiveEnv, runtime);
         appendSwitchLog(
           paths,
@@ -828,6 +830,11 @@ export async function runWorker(jobArg, env = process.env, dataDirArg = '') {
 
     let relaunchCode = '';
     if (!dryRun) {
+      if (typeof job.relaunchPauseMs === 'number' && Number.isFinite(job.relaunchPauseMs) && job.relaunchPauseMs > 0) {
+        const pauseMs = Math.min(10_000, Math.round(job.relaunchPauseMs));
+        appendSwitchLog(paths, `NATURAL_PAUSE ms=${pauseMs}`);
+        await delay(pauseMs);
+      }
       relaunchCode = relaunchAntigravity(effectiveEnv, runtime, stopInfo);
       appendSwitchLog(paths, relaunchCode);
       if (job.resume?.conversationId && !String(relaunchCode).startsWith('RELAUNCH_SKIPPED')) {

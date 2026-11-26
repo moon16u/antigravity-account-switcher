@@ -1,7 +1,7 @@
 import { createCipheriv, createDecipheriv, randomBytes, randomUUID } from 'node:crypto';
-import { lstatSync, readFileSync, writeFileSync } from 'node:fs';
+import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import {
   assertInsideDir,
   assertNotSymlink,
@@ -17,6 +17,29 @@ export { assertInsideDir, assertNotSymlink, atomicWriteFile, ensureSecureDir, sa
 export const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MAX_LOG_BYTES = 256 * 1024;
 const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+export function readSafeJsonFile(filePath, maxBytes) {
+  let fd;
+  try {
+    if (!lstatSync(dirname(filePath)).isDirectory() || !assertNotSymlink(filePath)) return null;
+    fd = openSync(filePath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    const st = fstatSync(fd);
+    if (!st.isFile() || st.size > maxBytes) return null;
+    const bytes = Buffer.alloc(st.size);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const count = readSync(fd, bytes, offset, bytes.length - offset, null);
+      if (!count) return null;
+      offset += count;
+    }
+    const parsed = JSON.parse(bytes.toString('utf8'), (key, val) => FORBIDDEN_KEYS.has(key) ? undefined : val);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
 
 export function resolvePaths(env = process.env, overrides = {}) {
   const geminiDir = resolve(overrides.geminiDir || env?.ANTIGRAVITY_GEMINI_DIR || join(homedir(), '.gemini'));
@@ -51,6 +74,8 @@ export function resolvePaths(env = process.env, overrides = {}) {
   const logPath = assertInsideDir(dataDir, join(dataDir, 'switch.log'));
   const settingsPath = assertInsideDir(dataDir, join(dataDir, 'settings.json'));
   const quotaAlertPath = assertInsideDir(dataDir, join(dataDir, 'quota-alert.json'));
+  const quotaSnapshotsPath = assertInsideDir(dataDir, join(dataDir, 'quota-snapshots.json'));
+  const quotaTriggerPath = assertInsideDir(dataDir, join(dataDir, 'quota-refresh-trigger.json'));
   const hookStatePath = assertInsideDir(dataDir, join(dataDir, 'hook-alert-state.json'));
   const useKeyring = !(
     Boolean(overrides.tokenPath) ||
@@ -71,6 +96,8 @@ export function resolvePaths(env = process.env, overrides = {}) {
     logPath,
     settingsPath,
     quotaAlertPath,
+    quotaSnapshotsPath,
+    quotaTriggerPath,
     hookStatePath,
     useKeyring,
   };
@@ -668,6 +695,8 @@ export function prepareSwitchJob(
     tokenStoreOpts = {},
     context = null,
     delayMs = 0,
+    syncOnboarding = false,
+    relaunchPauseMs = 0,
     resume = null,
     waitConversationIdle = null,
   } = {}
@@ -745,6 +774,7 @@ export function prepareSwitchJob(
     }
   }
 
+  const cleanRelaunchPauseMs = clampMs(relaunchPauseMs, 0, 0, 10_000);
   const cleanDelayMs =
     typeof delayMs === 'number' && Number.isFinite(delayMs) && delayMs > 0
       ? Math.min(15_000, Math.round(delayMs))
@@ -791,6 +821,8 @@ export function prepareSwitchJob(
     tokenRaw,
     createdAt: nowIso,
     ...(cleanDelayMs > 0 ? { delayMs: cleanDelayMs } : {}),
+    syncOnboarding: Boolean(syncOnboarding),
+    ...(cleanRelaunchPauseMs > 0 ? { relaunchPauseMs: cleanRelaunchPauseMs } : {}),
     ...(cleanResume ? { resume: cleanResume } : {}),
     ...(cleanWaitConversationIdle ? { waitConversationIdle: cleanWaitConversationIdle } : {}),
     ...(cleanContext ? { context: cleanContext } : {}),

@@ -1,46 +1,48 @@
 import assert from 'node:assert/strict';
-import { execFile, spawn } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import {
-  chmodSync,
+  closeSync,
   existsSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
-import http from 'node:http';
+import net from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { promisify } from 'node:util';
 import { extractActiveItemsFromLs, isInfrastructureProcess } from '../active-work.mjs';
-import { createApp } from '../main.mjs';
 import { syncOnboardingLastLoginUsername } from '../platform.mjs';
 import {
   DEFAULT_GUARD_SETTINGS,
+  computeNaturalPauseMs,
+  computeSessionThresholds,
   discoverLiveHub,
   evaluateQuotaAlert,
   loadGuardSettings,
   normalizeGuardSettings,
   pickBestBackupAccount,
-  readQuotaAlertSnapshot,
+  readQuotaRefreshTrigger,
   saveGuardSettings,
   writeQuotaAlertSnapshot,
+  writeQuotaRefreshTrigger,
 } from '../quota-guard.mjs';
+import { loadQuotaSnapshots, projectQuotaSummary, upsertQuotaSnapshot } from '../quota-snapshots.mjs';
 import {
   resolveAgentApiCommand,
   resumeConversationAfterRelaunch,
   waitForConversationIdleBeforeStop,
 } from '../switcher-worker.mjs';
-import { decryptPayload, getOrCreateKey, importAccount, loadVault, prepareSwitchJob, resolvePaths } from '../vault.mjs';
+import { decryptPayload, getOrCreateKey, importAccount, loadVault, prepareSwitchJob, resolvePaths, saveVault } from '../vault.mjs';
 import { createMcpHandlers, parseJsonRpcBuffer } from '../../../scripts/mcp-server.mjs';
 import { evaluateHookInput } from '../../../scripts/quota-hook.mjs';
 
-const execFileAsync = promisify(execFile);
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, '..', '..', '..');
 const MCP_SERVER_PATH = join(REPO_ROOT, 'scripts', 'mcp-server.mjs');
@@ -57,9 +59,14 @@ function makeSandbox(t) {
   });
   const env = {
     ANTIGRAVITY_GEMINI_DIR: geminiDir,
+    ANTIGRAVITY_APP_DATA_DIR: join(geminiDir, 'antigravity'),
+    ANTIGRAVITY_APP_STORAGE_PATH: join(root, 'app_storage.json'),
+    ANTIGRAVITY_LS_ADDRESS: 'test.invalid',
+    ANTIGRAVITY_CSRF_TOKEN: 'test-csrf',
     ANTIGRAVITY_EXECUTABLE_DATA_DIR: dataDir,
   };
   const paths = resolvePaths(env);
+  assert.equal(paths.useKeyring, false);
   return { root, geminiDir, dataDir, env, paths };
 }
 
@@ -76,85 +83,28 @@ function makeSampleToken(email, refresh = '1//refresh-test', access = 'ya29.acce
   });
 }
 
-function createFakeSidecarSdk() {
-  class Response {
-    constructor(body, opts = {}) {
-      this.body = body;
-      this.status = opts.status || 200;
-      this.contentType = opts.contentType || 'application/json';
-      this.headers = opts.headers || {};
-    }
+function runStdio(script, input, env, dir) {
+  const stdin = join(dir, 'stdin');
+  const stdout = join(dir, 'stdout');
+  writeFileSync(stdin, input);
+  const inFd = openSync(stdin, 'r');
+  const outFd = openSync(stdout, 'w');
+  try {
+    execFileSync(process.execPath, [script], {
+      env: { ...process.env, ...env }, stdio: [inFd, outFd, 'inherit'], timeout: 5000,
+    });
+  } finally {
+    closeSync(inFd);
+    closeSync(outFd);
   }
-  class SidecarApp {
-    #pages = new Map();
-    #apis = new Map();
-    #server = null;
-    #port = Number(process.env.ANTIGRAVITY_SIDECAR_WEB_PORT || 0);
-    #token = process.env.ANTIGRAVITY_SIDECAR_UI_TOKEN || '';
+  return readFileSync(stdout, 'utf8');
+}
 
-    page(path, handler) {
-      this.#pages.set(path, handler);
-    }
-    api(path, handler, method = 'POST') {
-      if (!this.#apis.has(path)) this.#apis.set(path, new Map());
-      this.#apis.get(path).set(method.toUpperCase(), handler);
-    }
-    run() {
-      const server = http.createServer(async (req, res) => {
-        const url = new URL(req.url, `http://127.0.0.1:${this.#port}`);
-        if (req.method !== 'GET' && this.#token) {
-          const provided = req.headers['x-sidecar-token'] || url.searchParams.get('token');
-          if (provided !== this.#token) {
-            res.writeHead(401, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: 'unauthorized' }));
-            return;
-          }
-        }
-        if (req.method === 'GET' && this.#pages.has(url.pathname)) {
-          const out = await this.#pages.get(url.pathname)();
-          if (out instanceof Response) {
-            res.writeHead(out.status || 200, { 'Content-Type': out.contentType, ...out.headers });
-            res.end(out.body);
-            return;
-          }
-        }
-        const methodMap = this.#apis.get(url.pathname);
-        if (methodMap?.has(req.method)) {
-          const chunks = [];
-          req.on('data', (c) => chunks.push(c));
-          req.on('end', async () => {
-            const raw = Buffer.concat(chunks).toString('utf8');
-            const data = raw ? JSON.parse(raw) : {};
-            const result = await methodMap.get(req.method)(data);
-            if (result instanceof Response) {
-              res.writeHead(result.status || 200, {
-                'Content-Type': result.contentType,
-                ...result.headers,
-              });
-              res.end(result.body);
-              return;
-            }
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify(result));
-          });
-          return;
-        }
-        res.writeHead(404);
-        res.end('Not found');
-      });
-      return new Promise((resolve) => {
-        this.#server = server.listen(this.#port, '127.0.0.1', () => resolve(server));
-      });
-    }
-    close() {
-      return new Promise((resolve) => {
-        if (!this.#server) return resolve();
-        this.#server.closeAllConnections?.();
-        this.#server.close(() => resolve());
-      });
-    }
-  }
-  return { SidecarApp, Response };
+function geminiQuota(weekly, fiveHour = 0.9, weeklyResetTime = '') {
+  return { groups: [{ displayName: 'Gemini', buckets: [
+    { bucketId: 'gemini-weekly', remainingFraction: weekly, resetTime: weeklyResetTime },
+    { bucketId: 'gemini-5h', remainingFraction: fiveHour },
+  ] }] };
 }
 
 test('resolvePaths prioritizes sidecar_data over PLUGIN_DATA when present', (t) => {
@@ -180,6 +130,9 @@ test('quota-guard settings normalization, alert thresholds, and best-backup sele
   const { paths } = makeSandbox(t);
 
   assert.deepEqual(loadGuardSettings(paths), DEFAULT_GUARD_SETTINGS);
+  assert.equal(DEFAULT_GUARD_SETTINGS.skipOnboardingPrompt, false);
+  assert.equal(DEFAULT_GUARD_SETTINGS.dynamicThresholdEnabled, true);
+  assert.equal(DEFAULT_GUARD_SETTINGS.naturalPauseEnabled, true);
   const polluted = JSON.parse('{"thresholdPercent":999,"switchDelaySec":0,"autoSwitchEnabled":true,"__proto__":{"polluted":true}}');
   const normalized = normalizeGuardSettings(polluted);
   assert.equal(normalized.thresholdPercent, 50);
@@ -427,278 +380,6 @@ test('switcher-worker prepareSwitchJob delay/resume and post-relaunch agentapi w
   assert.equal(execCalls[0].env.ELECTRON_RUN_AS_NODE, undefined);
 });
 
-test('Sidecar /api/settings/update, quota snapshot refresh, and UI CSP invariants', async (t) => {
-  const { paths, env } = makeSandbox(t);
-  const activeAcc = importAccount(paths, {
-    credentialText: makeSampleToken('active@example.com', '1//refresh-active'),
-    label: 'Active',
-  });
-  const backupAcc = importAccount(paths, {
-    credentialText: makeSampleToken('backup@example.com', '1//refresh-backup'),
-    label: 'Backup',
-  });
-
-  const srv = await createApp({
-    sidecarSdk: createFakeSidecarSdk(),
-    env,
-    port: 0,
-    uiToken: 'guard-ui-token',
-    quotaPollIntervalMs: 0,
-    getUserStatus: async () => ({ lsConnected: true, email: 'active@example.com', tierName: 'Google AI Pro' }),
-    cloudCodeService: {
-      fetchAccountUsage: async ({ id }) => {
-        if (id === activeAcc.id) {
-          return {
-            id,
-            tierName: 'Google AI Pro',
-            usage: {
-              groups: [
-                {
-                  displayName: 'Gemini Models',
-                  buckets: [
-                    { bucketId: 'gemini-weekly', window: 'weekly', remainingFraction: 0.08 },
-                    { bucketId: 'gemini-5h', window: '5h', remainingFraction: 0.75 },
-                  ],
-                },
-              ],
-            },
-          };
-        }
-        return {
-          id: backupAcc.id,
-          tierName: 'Google AI Ultra',
-          usage: {
-            groups: [
-              {
-                displayName: 'Gemini Models',
-                buckets: [
-                  { bucketId: 'gemini-weekly', window: 'weekly', remainingFraction: 0.95 },
-                  { bucketId: 'gemini-5h', window: '5h', remainingFraction: 0.99 },
-                ],
-              },
-            ],
-          },
-        };
-      },
-    },
-  });
-
-  const httpServer = await srv.start();
-  t.after(async () => {
-    await srv.close();
-  });
-
-  const baseUrl = `http://127.0.0.1:${httpServer.address().port}`;
-  const updateRes = await fetch(`${baseUrl}/api/settings/update`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Sidecar-Token': 'guard-ui-token' },
-    body: JSON.stringify({
-      alertEnabled: true,
-      thresholdPercent: 10,
-      autoSwitchEnabled: true,
-      autoResumeEnabled: true,
-    }),
-  });
-  assert.equal(updateRes.status, 200);
-  const updateJson = await updateRes.json();
-  assert.equal(updateJson.settings.autoSwitchEnabled, true);
-  assert.equal(updateJson.quotaAlert.triggered, true);
-  assert.equal(updateJson.quotaAlert.bestCandidate.id, backupAcc.id);
-  assert.equal(JSON.stringify(updateJson.quotaAlert).includes('1//'), false);
-  assert.equal(JSON.stringify(updateJson.quotaAlert).includes('backup@example.com'), false);
-
-  if (process.platform !== 'win32') {
-    assert.equal(lstatSync(paths.settingsPath).mode & 0o777, 0o600);
-    assert.equal(lstatSync(paths.quotaAlertPath).mode & 0o777, 0o600);
-  }
-
-  // UI strict CSP checks
-  const html = readFileSync(join(REPO_ROOT, 'sidecars', 'switcher', 'public', 'index.html'), 'utf8');
-  const appJs = readFileSync(join(REPO_ROOT, 'sidecars', 'switcher', 'public', 'app.js'), 'utf8');
-  assert.equal(html.includes('guard-settings-form'), true);
-  assert.equal(/\bstyle\s*=/.test(html), false);
-  assert.equal(/\bon\w+\s*=/.test(html), false);
-  assert.equal(appJs.includes('innerHTML'), false);
-  assert.equal(/\b(alert|confirm|prompt)\s*\(/.test(appJs), false);
-});
-
-test('MCP server handles stdio JSON-RPC, active-work exclusion, pickBest, and zero token leaks', async (t) => {
-  const { paths, env, dataDir } = makeSandbox(t);
-  const activeAcc = importAccount(paths, {
-    credentialText: makeSampleToken('active@example.com', '1//secret-active-rt'),
-    label: 'Active',
-  });
-  const backupAcc = importAccount(paths, {
-    credentialText: makeSampleToken('backup@example.com', '1//secret-backup-rt'),
-    label: 'Backup',
-  });
-
-  const spawnedJobs = [];
-  let activeTrajectories = {
-    'conv-self': { status: 'CASCADE_RUN_STATUS_RUNNING', summary: 'Self conversation' },
-    'conv-other': { status: 'CASCADE_RUN_STATUS_RUNNING', summary: 'Other user conversation' },
-  };
-
-  const mcp = createMcpHandlers({
-    env,
-    discoverLiveHub: async () => ({
-      lsAddress: 'http://127.0.0.1:41234',
-      csrfToken: 'test-csrf',
-      pid: 1234,
-      userStatus: { email: 'active@example.com', userTier: { name: 'Google AI Pro' } },
-    }),
-    detectActiveWork: async (_lsEnv, opts) => {
-      const items = extractActiveItemsFromLs({
-        trajectories: { trajectorySummaries: activeTrajectories },
-        excludeConversationIds: opts?.excludeConversationIds || [],
-      });
-      return { busy: items.length > 0, count: items.length, items, truncated: false };
-    },
-    cloudCodeService: {
-      fetchAccountUsage: async ({ id }) => ({
-        id,
-        tierName: 'Google AI Pro',
-        usage: {
-          groups: [
-            {
-              displayName: 'Gemini Models',
-              buckets:
-                id === activeAcc.id
-                  ? [
-                      { bucketId: 'gemini-weekly', remainingFraction: 0.05 },
-                      { bucketId: 'gemini-5h', remainingFraction: 0.5 },
-                    ]
-                  : [
-                      { bucketId: 'gemini-weekly', remainingFraction: 0.9 },
-                      { bucketId: 'gemini-5h', remainingFraction: 0.92 },
-                    ],
-            },
-          ],
-        },
-      }),
-    },
-    spawnWorker: async (jobPath) => {
-      spawnedJobs.push(jobPath);
-    },
-  });
-
-  saveGuardSettings(paths, { autoSwitchEnabled: true, autoResumeEnabled: true, switchDelaySec: 3 });
-
-  // 1. list_accounts & get_quota never leak tokens
-  const listRes = await mcp.handleJsonRpc({
-    jsonrpc: '2.0',
-    id: 1,
-    method: 'tools/call',
-    params: { name: 'list_accounts', arguments: {} },
-  });
-  const listText = listRes.result.content[0].text;
-  assert.equal(listText.includes('1//'), false);
-  assert.equal(listText.includes('active@example.com'), false);
-
-  const quotaRes = await mcp.handleJsonRpc({
-    jsonrpc: '2.0',
-    id: 2,
-    method: 'tools/call',
-    params: { name: 'get_quota', arguments: { includeAll: true } },
-  });
-  const quotaPayload = JSON.parse(quotaRes.result.content[0].text);
-  assert.equal(quotaPayload.bestCandidate.id, backupAcc.id);
-
-  // 2. Blocked when conv-other is active
-  const blockedRes = await mcp.handleJsonRpc({
-    jsonrpc: '2.0',
-    id: 3,
-    method: 'tools/call',
-    params: {
-      name: 'switch_account',
-      arguments: { pickBest: true, conversationId: 'conv-self', reason: 'low quota' },
-    },
-  });
-  assert.equal(blockedRes.result.isError, true);
-  assert.equal(JSON.parse(blockedRes.result.content[0].text).code, 'ACTIVE_WORK_RUNNING');
-  assert.equal(spawnedJobs.length, 0);
-
-  // 3. Succeeds once only conv-self is running
-  activeTrajectories = {
-    'conv-self': { status: 'CASCADE_RUN_STATUS_RUNNING', summary: 'Self conversation' },
-  };
-  const okRes = await mcp.handleJsonRpc({
-    jsonrpc: '2.0',
-    id: 4,
-    method: 'tools/call',
-    params: {
-      name: 'switch_account',
-      arguments: { pickBest: true, conversationId: 'conv-self', reason: 'low quota' },
-    },
-  });
-  assert.equal(okRes.result.isError, undefined);
-  const okPayload = JSON.parse(okRes.result.content[0].text);
-  assert.equal(okPayload.ok, true);
-  assert.equal(okPayload.targetAccountId, backupAcc.id);
-  assert.equal(okPayload.autoResumeScheduled, true);
-  assert.equal(okPayload.message.includes('将在本轮回复完成后（最多 10 秒）自动关闭并重启 Antigravity'), true);
-  assert.equal(spawnedJobs.length, 1);
-
-  const encryptedJob = JSON.parse(readFileSync(spawnedJobs[0], 'utf8'));
-  const decryptedJob = decryptPayload(encryptedJob, getOrCreateKey(paths));
-  assert.deepEqual(decryptedJob.waitConversationIdle, {
-    conversationId: 'conv-self',
-    minDelayMs: 1500,
-    maxWaitMs: 10000,
-    fallbackDelayMs: 3000,
-  });
-
-  // Real subprocess stdio JSON-RPC test (newline + Content-Length framing)
-  const child = spawn(process.execPath, [MCP_SERVER_PATH], {
-    env: { ...process.env, ANTIGRAVITY_GEMINI_DIR: env.ANTIGRAVITY_GEMINI_DIR, ANTIGRAVITY_EXECUTABLE_DATA_DIR: dataDir },
-    stdio: ['pipe', 'pipe', 'pipe'],
-  });
-  t.after(() => {
-    child.kill();
-  });
-
-  const responses = [];
-  let buf = Buffer.alloc(0);
-  const waitResponses = (count) =>
-    new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error(`Timeout waiting for ${count} MCP responses`)), 5000);
-      const check = () => {
-        if (responses.length >= count) {
-          clearTimeout(timer);
-          resolve();
-        }
-      };
-      child.stdout.on('data', (chunk) => {
-        buf = Buffer.concat([buf, chunk]);
-        const parsed = parseJsonRpcBuffer(buf);
-        buf = parsed.rest;
-        for (const item of parsed.messages) responses.push(item.msg);
-        check();
-      });
-      check();
-    });
-
-  child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 10, method: 'initialize', params: {} }) + '\n');
-  child.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n');
-  child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 11, method: 'tools/list', params: {} }) + '\n');
-  const statusReq = JSON.stringify({
-    jsonrpc: '2.0',
-    id: 12,
-    method: 'tools/call',
-    params: { name: 'get_switcher_status', arguments: {} },
-  });
-  child.stdin.write(`Content-Length: ${Buffer.byteLength(statusReq)}\r\n\r\n${statusReq}`);
-
-  await waitResponses(3);
-  child.stdin.end();
-  assert.equal(responses[0].id, 10);
-  assert.equal(responses[1].id, 11);
-  assert.equal(responses[1].result.tools.length, 4);
-  assert.equal(responses[2].id, 12);
-  const statusJson = JSON.parse(responses[2].result.content[0].text);
-  assert.equal(statusJson.accountCount, 2);
-});
-
 test('quota-hook injects once per conversation, deduplicates, clears on recovery, and fails open', async (t) => {
   const { paths, env } = makeSandbox(t);
   saveGuardSettings(paths, {
@@ -728,27 +409,13 @@ test('quota-hook injects once per conversation, deduplicates, clears on recovery
   });
 
   // 1. Real subprocess execution with low-quota snapshot -> injects once
-  const runHook = (stdinText) =>
-    new Promise((resolve, reject) => {
-      const child = spawn(process.execPath, [QUOTA_HOOK_PATH], {
-        env: { ...process.env, ...env },
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
-      let out = '';
-      let err = '';
-      child.stdout.on('data', (c) => (out += c));
-      child.stderr.on('data', (c) => (err += c));
-      child.on('error', reject);
-      child.on('close', (code) => resolve({ code, out, err }));
-      child.stdin.end(stdinText);
-    });
+  const runHook = input => runStdio(QUOTA_HOOK_PATH, input, env, paths.dataDir);
 
   const startedAt = Date.now();
   const firstRun = await runHook(JSON.stringify({ conversationId: 'conv-hook-1', invocationNum: 2 }));
   const elapsedMs = Date.now() - startedAt;
-  assert.equal(firstRun.code, 0);
   assert.ok(elapsedMs < 5000, `Hook took unexpectedly long: ${elapsedMs}ms`);
-  const firstJson = JSON.parse(firstRun.out);
+  const firstJson = JSON.parse(firstRun);
   assert.equal(firstJson.injectSteps.length, 1);
   const injectedText = firstJson.injectSteps[0].systemMessage.systemMessage;
   assert.equal(injectedText.includes('周额度剩余 9%'), true);
@@ -758,8 +425,7 @@ test('quota-hook injects once per conversation, deduplicates, clears on recovery
 
   // 2. Second invocation in same conversation deduplicates cleanly
   const secondRun = await runHook(JSON.stringify({ conversationId: 'conv-hook-1', invocationNum: 3 }));
-  assert.equal(secondRun.code, 0);
-  assert.deepEqual(JSON.parse(secondRun.out), { injectSteps: [] });
+  assert.deepEqual(JSON.parse(secondRun), { injectSteps: [] });
 
   // 3. Different conversation still gets alerted
   const otherConv = evaluateHookInput({ conversationId: 'conv-hook-2' }, env);
@@ -780,8 +446,7 @@ test('quota-hook injects once per conversation, deduplicates, clears on recovery
 
   // 5. Malformed stdin fails open with exit 0 and empty injectSteps
   const badRun = await runHook('{not-valid-json');
-  assert.equal(badRun.code, 0);
-  assert.deepEqual(JSON.parse(badRun.out), { injectSteps: [] });
+  assert.deepEqual(JSON.parse(badRun), { injectSteps: [] });
 
   // 6. Symlinked snapshot is rejected fail-open on Unix
   if (process.platform !== 'win32') {
@@ -1002,4 +667,303 @@ test('resumeConversationAfterRelaunch waits postHubReadyDelayMs after hub discov
   assert.deepEqual(events, ['discover:1', 'delay:50', 'discover:2', 'delay:2750', 'exec:send-message']);
   const logText = readFileSync(paths.logPath, 'utf8');
   assert.equal(logText.includes('AUTO_RESUME_WAIT_MCP ms=2750'), true);
+});
+
+test('guard thresholds and natural pause use bounded jitter and respect disabled settings', () => {
+  const min = computeSessionThresholds(10, { randomFn: () => 0 });
+  const max = computeSessionThresholds(10, { randomFn: () => 0.999999 });
+  assert.deepEqual(min, { baseThreshold: 10, hardFloor: 8, softThreshold: 12, jittered: true });
+  assert.deepEqual(max, { baseThreshold: 10, hardFloor: 12, softThreshold: 22, jittered: true });
+  for (const base of [1, 10, 50]) {
+    assert.deepEqual(computeSessionThresholds(base, { dynamicEnabled: false }), {
+      baseThreshold: base, hardFloor: base, softThreshold: base, jittered: false,
+    });
+  }
+  assert.equal(computeNaturalPauseMs({ randomFn: () => 0 }), 3000);
+  assert.equal(computeNaturalPauseMs({ randomFn: () => 0.999999 }), 8000);
+  assert.equal(computeNaturalPauseMs({ enabled: false }), 0);
+});
+
+test('guard levels distinguish wrap-up and hard limits, including equal thresholds', () => {
+  const thresholds = { softThreshold: 16, hardFloor: 10 };
+  const evaluate = (w, h) => evaluateQuotaAlert(geminiQuota(w, h), DEFAULT_GUARD_SETTINGS, { sessionThresholds: thresholds });
+  for (const [weekly, fiveHour, level, buckets] of [
+    [0.17, 0.5, 'ok', []],
+    [0.16, 0.5, 'soft', ['gemini-weekly']],
+    [0.16, 0.10, 'hard', ['gemini-5h']],
+    [0.01, 0.10, 'hard', ['gemini-weekly', 'gemini-5h']],
+    [0.7, 0.9, 'ok', []],
+  ]) {
+    const alert = evaluate(weekly, fiveHour);
+    assert.equal(alert.level, level);
+    assert.equal(alert.triggered, level !== 'ok');
+    assert.deepEqual(alert.triggeredBuckets, buckets);
+  }
+  const fixed = computeSessionThresholds(10, { dynamicEnabled: false });
+  assert.equal(evaluateQuotaAlert(geminiQuota(0.11), DEFAULT_GUARD_SETTINGS, { sessionThresholds: fixed }).level, 'ok');
+});
+
+test('backup scoring ranks a locally projected reset above another healthy account', () => {
+  const capturedAt = '2025-01-01T00:00:00Z';
+  const summary = geminiQuota(0.02, 0.95, '2025-01-02T00:00:00Z');
+  const accounts = [{ id: 'reset' }, { id: 'healthy' }];
+  const pick = nowMs => pickBestBackupAccount(accounts, new Map([
+    ['reset', projectQuotaSummary({ summary, capturedAt }, { nowMs })],
+    ['healthy', { usage: geminiQuota(0.8) }],
+  ]));
+  assert.equal(pick(Date.parse(capturedAt)).id, 'healthy');
+  const after = pick(Date.parse('2025-01-02T00:00:00Z'));
+  assert.equal(after.id, 'reset');
+  assert.equal(after.estimatedReset, true);
+  assert.equal(after.weeklyPercent, 100);
+  assert.equal(after.capturedAt, capturedAt);
+});
+
+test('guard refresh trigger throttles until exactly 60 seconds after the previous write', (t) => {
+  const { paths } = makeSandbox(t);
+  const write = nowMs => writeQuotaRefreshTrigger(paths, { nowMs, conversationId: 'conv-' + nowMs });
+  assert.deepEqual(write(1000), { written: true, throttled: false });
+  assert.deepEqual(write(60999), { written: false, throttled: true });
+  assert.equal(readQuotaRefreshTrigger(paths).conversationId, 'conv-1000');
+  assert.deepEqual(write(61000), { written: true, throttled: false });
+  assert.equal(readQuotaRefreshTrigger(paths).requestedAt, new Date(61000).toISOString());
+});
+
+test('both quota hooks are registered and PostInvocation only writes a throttled private trigger', (t) => {
+  const hooks = JSON.parse(readFileSync(join(REPO_ROOT, 'hooks.json'), 'utf8'))['quota-guard'];
+  assert.equal(hooks.enabled, true);
+  for (const event of ['PreInvocation', 'PostInvocation']) {
+    assert.ok(hooks[event].some(h => h.type === 'command' && h.command.includes('./scripts/quota-hook.mjs')), event);
+  }
+  const { env, paths } = makeSandbox(t);
+  env.ANTIGRAVITY_LS_ADDRESS = 'http://127.0.0.1:19781';
+  const unexpected = () => { throw new Error('unexpected network access'); };
+  const socket = t.mock.method(net.Socket.prototype, 'connect', unexpected);
+  const fetch = t.mock.method(globalThis, 'fetch', unexpected);
+  const post = nowMs => evaluateHookInput({
+    hookEventName: 'PostInvocation', conversationId: 'conv-' + nowMs,
+  }, env, { nowMs });
+  saveGuardSettings(paths, { alertEnabled: false });
+  assert.deepEqual(post(0), {});
+  assert.equal(existsSync(paths.quotaTriggerPath), false);
+  saveGuardSettings(paths, { alertEnabled: true });
+  assert.deepEqual(post(0), {});
+  const first = readFileSync(paths.quotaTriggerPath, 'utf8');
+  assert.deepEqual(JSON.parse(first), {
+    v: 1, event: 'PostInvocation', conversationId: 'conv-0', requestedAt: new Date(0).toISOString(),
+  });
+  if (process.platform !== 'win32') assert.equal(lstatSync(paths.quotaTriggerPath).mode & 0o777, 0o600);
+  assert.deepEqual(post(59_999), {});
+  assert.equal(readFileSync(paths.quotaTriggerPath, 'utf8'), first);
+  assert.deepEqual(post(60_000), {});
+  assert.equal(readQuotaRefreshTrigger(paths).conversationId, 'conv-60000');
+  assert.equal(socket.mock.callCount(), 0);
+  assert.equal(fetch.mock.callCount(), 0);
+});
+
+test('PreInvocation re-alerts on escalation from soft wrap-up to hard switch and deduplicates each level', (t) => {
+  const { env, paths } = makeSandbox(t);
+  saveGuardSettings(paths, { autoSwitchEnabled: true });
+  const pre = () => evaluateHookInput({ hookEventName: 'PreInvocation', conversationId: 'conv-escalate' }, env);
+  const store = (level, weeklyPercent) => writeQuotaAlertSnapshot(paths, {
+    activeAccountId: 'current', triggered: level !== 'ok', level,
+    triggeredBuckets: ['gemini-weekly'], weeklyPercent, softThresholdPercent: 17, hardFloorPercent: 9,
+    bestCandidate: { id: 'backup', estimatedReset: true },
+  });
+  store('soft', 16);
+  const soft = pre().injectSteps[0].systemMessage;
+  assert.equal(soft.metadata.level, 'soft');
+  assert.match(soft.systemMessage, /收尾阈值 17%/);
+  assert.doesNotMatch(soft.systemMessage, /switch_account/);
+  store('soft', 15);
+  assert.deepEqual(pre(), { injectSteps: [] });
+  store('hard', 9);
+  const hard = pre().injectSteps[0].systemMessage;
+  assert.equal(hard.metadata.level, 'hard');
+  assert.match(hard.systemMessage, /硬性阈值 9%/);
+  assert.match(hard.systemMessage, /switch_account/);
+  assert.match(hard.systemMessage, /按重置时间回升/);
+  assert.deepEqual(pre(), { injectSteps: [] });
+  store('ok', 90);
+  assert.deepEqual(pre(), { injectSteps: [] });
+  store('soft', 17);
+  assert.equal(pre().injectSteps[0].systemMessage.metadata.level, 'soft');
+});
+
+function mcpFixture(t, overrides = {}) {
+  const { paths, env } = makeSandbox(t);
+  const add = name => importAccount(paths, { credentialText: makeSampleToken(name + '@example.com'), label: name });
+  const active = add('active');
+  const jobs = [];
+  const rpc = t.mock.fn(async () => geminiQuota(0.05));
+  const mcp = createMcpHandlers({
+    env,
+    discoverLiveHub: async () => ({
+      lsAddress: 'http://127.0.0.1:19456', csrfToken: 'test', pid: 123,
+      userStatus: { email: 'active@example.com', userTier: { name: 'Pro' } },
+    }),
+    detectActiveWork: async () => ({ busy: false }),
+    callLsRpc: rpc,
+    spawnWorker: path => {
+      jobs.push({
+        job: decryptPayload(JSON.parse(readFileSync(path, 'utf8')), getOrCreateKey(paths)),
+        outgoing: loadQuotaSnapshots(paths).accounts[active.id],
+      });
+    },
+    ...overrides,
+  });
+  const call = async (name, args, { error = false } = {}) => {
+    const { result } = await mcp.handleJsonRpc({
+      jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args },
+    });
+    const payload = result.content[0].text;
+    assert.doesNotMatch(payload, /1\/\/|ya29\.|refresh_token|access_token|(?<!\*)\b\w+@example\.com/);
+    assert.equal(Boolean(result.isError), error, payload);
+    return JSON.parse(payload);
+  };
+  const snapshot = (account, summary, capturedAt) =>
+    upsertQuotaSnapshot(paths, { accountId: account.id, summary, capturedAt });
+  return { paths, env, active, add, jobs, rpc, call, snapshot };
+}
+
+test('MCP stdio initializes at 0.4.0 and supports newline and Content-Length framing', (t) => {
+  const { paths, env } = makeSandbox(t);
+  importAccount(paths, { credentialText: makeSampleToken('stdio@example.com') });
+  const status = JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'get_switcher_status' } });
+  const input = [
+    JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} }),
+    JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }),
+    JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }),
+    'Content-Length: ' + Buffer.byteLength(status) + '\r\n\r\n' + status,
+  ].join('\n');
+  const { rest, messages } = parseJsonRpcBuffer(runStdio(MCP_SERVER_PATH, input, env, paths.dataDir));
+  assert.equal(rest.length, 0);
+  assert.deepEqual(messages.map(m => [m.msg.id, m.framing]), [[1, 'line'], [2, 'line'], [3, 'content-length']]);
+  assert.equal(messages[0].msg.result.serverInfo.version, '0.4.0');
+  assert.equal(messages[1].msg.result.tools.length, 4);
+  assert.equal(JSON.parse(messages[2].msg.result.content[0].text).accountCount, 1);
+});
+
+test('MCP get_quota(includeAll) reads live quota once and projects inactive accounts locally', async (t) => {
+  const { active, add, rpc, call, snapshot } = mcpFixture(t);
+  const backup = add('reset'), missing = add('missing');
+  const capturedAt = new Date(Date.now() - 25 * 3600_000).toISOString();
+  snapshot(backup, geminiQuota(0.02, 0.79, new Date(Date.now() - 1000).toISOString()), capturedAt);
+  const listed = await call('list_accounts', {});
+  assert.equal(listed.accounts.length, 3);
+  const result = await call('get_quota', { includeAll: true, forceRefresh: true });
+  assert.equal(result.accounts.length, 3);
+  const rows = new Map(result.accounts.map(row => [row.id, row]));
+  const live = rows.get(active.id);
+  assert.equal(live.source, 'live');
+  assert.ok(Number.isFinite(Date.parse(live.capturedAt)));
+  assert.equal(live.isStale, false);
+  assert.equal(live.estimatedAnyReset, false);
+  assert.equal(live.usage.groups[0].buckets[0].remainingFraction, 0.05);
+  const projected = rows.get(backup.id);
+  assert.equal(projected.source, 'snapshot');
+  assert.equal(projected.capturedAt, capturedAt);
+  assert.equal(projected.isStale, true);
+  assert.equal(projected.estimatedAnyReset, true);
+  assert.equal(projected.usage.groups[0].buckets[0].remainingFraction, 1);
+  assert.equal(rows.get(missing.id).source, 'none');
+  assert.equal(rows.get(missing.id).hasSnapshot, false);
+  assert.equal(result.bestCandidate.id, backup.id);
+  await call('get_quota', { accountId: backup.id, forceRefresh: true });
+  assert.equal(rpc.mock.callCount(), 1);
+  const [lsEnv, method, opts] = rpc.mock.calls[0].arguments;
+  assert.equal(lsEnv.ANTIGRAVITY_LS_ADDRESS, 'http://127.0.0.1:19456');
+  assert.equal(method, 'RetrieveUserQuotaSummary');
+  assert.deepEqual(opts.body, { forceRefresh: true });
+});
+
+test('MCP pickBest selects the highest projected quota and persists outgoing quota before worker dispatch', async (t) => {
+  let otherBusy = true;
+  const { paths, add, jobs, rpc, call, snapshot } = mcpFixture(t, {
+    detectActiveWork: async (_env, { excludeConversationIds }) => {
+      assert.deepEqual(excludeConversationIds, ['conv-self']);
+      const summaries = { 'conv-self': { status: 'CASCADE_RUN_STATUS_RUNNING' } };
+      if (otherBusy) summaries.other = { status: 'CASCADE_RUN_STATUS_RUNNING' };
+      const items = extractActiveItemsFromLs({ trajectories: { trajectorySummaries: summaries }, excludeConversationIds });
+      return { busy: items.length > 0, items };
+    },
+  });
+  const healthy = add('healthy'), reset = add('reset');
+  add('unsnapshotted');
+  snapshot(healthy, geminiQuota(0.82, 0.8));
+  snapshot(reset, geminiQuota(0.01, 0.95, '2020-01-01T00:00:00Z'));
+  saveGuardSettings(paths, { autoResumeEnabled: true, skipOnboardingPrompt: true });
+  const args = { pickBest: true, conversationId: 'conv-self', reason: 'low quota' };
+  assert.equal((await call('switch_account', args, { error: true })).code, 'ACTIVE_WORK_RUNNING');
+  assert.equal(rpc.mock.callCount(), 0);
+  assert.equal(jobs.length, 0);
+  otherBusy = false;
+  const result = await call('switch_account', args);
+  assert.equal(result.targetAccountId, reset.id);
+  assert.equal(result.selectionSource, 'snapshot');
+  assert.equal(result.autoResumeScheduled, true);
+  assert.equal(jobs.length, 1);
+  const { job, outgoing } = jobs[0];
+  assert.equal(outgoing.syncSource, 'pre_switch_snapshot');
+  assert.equal(outgoing.summary.groups[0].buckets[0].remainingFraction, 0.05);
+  assert.equal(rpc.mock.callCount(), 1);
+  assert.deepEqual(rpc.mock.calls[0].arguments[2].body, { forceRefresh: true });
+  assert.equal(job.targetEmail, 'reset@example.com');
+  assert.equal(job.syncOnboarding, true);
+  assert.ok(job.relaunchPauseMs >= 3000 && job.relaunchPauseMs <= 8000);
+  assert.deepEqual(job.waitConversationIdle, {
+    conversationId: 'conv-self', minDelayMs: 1500, maxWaitMs: 10000, fallbackDelayMs: 3000,
+  });
+});
+
+test('MCP pickBest falls back to least recently used unsnapshotted backup and refuses all-depleted backups', async (t) => {
+  const { paths, add, jobs, rpc, call, snapshot } = mcpFixture(t);
+  const depleted = add('depleted'), recent = add('recent'), oldest = add('oldest');
+  const vault = loadVault(paths);
+  for (const acc of vault.accounts) {
+    acc.lastUsedAt = acc.id === oldest.id ? '2023-01-01T00:00:00Z' : '2024-01-01T00:00:00Z';
+  }
+  saveVault(paths, vault);
+  saveGuardSettings(paths, { naturalPauseEnabled: false });
+  snapshot(depleted, geminiQuota(0.04));
+  const result = await call('switch_account', { pickBest: true });
+  assert.equal(result.selectionSource, 'unsnapshotted-fallback');
+  assert.equal(result.targetAccountId, oldest.id);
+  assert.equal(jobs[0].job.syncOnboarding, false);
+  assert.equal(jobs[0].job.relaunchPauseMs ?? 0, 0);
+  snapshot(oldest, geminiQuota(0.01));
+  snapshot(recent, geminiQuota(0.8, 0.02));
+  const rejected = await call('switch_account', { pickBest: true }, { error: true });
+  assert.equal(rejected.code, 'NO_HEALTHY_BACKUP_ACCOUNT');
+  assert.equal(jobs.length, 1);
+  assert.equal(rpc.mock.callCount(), 1);
+});
+
+test('MCP keeps the live quota cache between tool calls and discards it when the local hub changes', async (t) => {
+  let port = 19501;
+  let now = 1000;
+  const { rpc, call } = mcpFixture(t, {
+    discoverLiveHub: async () => ({
+      lsAddress: 'http://127.0.0.1:' + port, csrfToken: 'local-test', userStatus: { email: 'active@example.com' },
+    }),
+    quotaServiceOptions: { nowFn: () => now, cacheTtlMs: 30_000 },
+  });
+  const get = async (forceRefresh = false) => {
+    const result = await call('get_quota', { forceRefresh });
+    assert.equal(result.accounts[0].source, 'live');
+  };
+  await Promise.all([get(), get()]);
+  assert.equal(rpc.mock.callCount(), 1);
+  now += 29_999;
+  await get();
+  assert.equal(rpc.mock.callCount(), 1);
+  now++;
+  await get();
+  assert.equal(rpc.mock.callCount(), 2);
+  await get(true);
+  assert.equal(rpc.mock.callCount(), 3);
+  port++;
+  await get();
+  assert.equal(rpc.mock.callCount(), 4);
+  assert.equal(rpc.mock.calls[3].arguments[0].ANTIGRAVITY_LS_ADDRESS, 'http://127.0.0.1:19502');
 });

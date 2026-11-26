@@ -6,6 +6,30 @@ All notable changes to **Antigravity Account Switcher** are documented in this f
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-11-26
+
+Low-Risk Architecture Hardening: the plugin is now fully local-first, makes no direct outbound Google API calls, performs no runtime binary OAuth extraction, and runs no idle background polling.
+
+### Added
+
+- Local-first quota snapshot cache and reset-countdown projection (`sidecars/switcher/quota-snapshots.mjs`, `quota-snapshots.json`): only the active account queries the local `language_server` RPC (`RetrieveUserQuotaSummary`), pre-switch final snapshots are captured automatically (best-effort), and inactive accounts render local snapshots with `Estimated reset` / `Est. 100%` projection plus a >24h staleness indicator, with zero remote requests.
+- Conversation-lifecycle event-driven quota checks: the `PostInvocation` hook (`hooks.json`, `scripts/quota-hook.mjs`) writes a throttled local trigger file (`quota-refresh-trigger.json`) watched by the Sidecar through `fs.watch`, eliminating idle heartbeat polling while keeping hooks non-blocking.
+- Non-mechanical dynamic threshold range (per-session jittered soft wrap-up threshold + hard floor, `dynamicThresholdEnabled`, default on) and natural relaunch pause (random 3–8s delay before relaunch, `naturalPauseEnabled`, default on).
+- Opt-in toggle `skipOnboardingPrompt` (**default OFF**) in the **Advanced Settings** panel to control whether `switcher-worker` updates `app_storage.json` (`agy.onboarding.lastLoginUsername`) to skip repeated onboarding modals.
+
+### Changed
+
+- Promoted native sign-in (`+ Add Account` → back up the active account, restart into official Google sign-in, then click `Save Account`) as the primary and sole account addition flow.
+- Updated the MCP server (`0.4.0`) `get_quota` and `switch_account` (`pickBest: true`) to use local snapshots plus reset projection (with a least-recently-used unsnapshotted fallback) and to capture pre-switch snapshots before switching.
+- Updated the `PreInvocation` hook to emit level-aware alerts (`soft` wrap-up reminder vs `hard` switch prompt) with per-level conversation deduplication.
+- Renamed the sidebar settings entry to **Advanced Settings** and refreshed it with concise setting titles, hover-only `ⓘ` info/risk tooltips, and right-aligned instant **On / Off** toggle buttons consistent with the Saved Accounts action controls.
+
+### Removed
+
+- Removed all direct remote `v1internal:loadCodeAssist` / `v1internal:retrieveUserQuotaSummary` HTTP calls and custom `antigravity/hub/<ver>` User-Agent construction (`cloudcode.mjs` removed).
+- Removed runtime binary OAuth client extraction (`binary-oauth.mjs`) and the self-hosted browser PKCE OAuth flow (`oauth.mjs`, `/api/oauth/*`, `/api/accounts/sync-tiers`).
+- Removed the 60-second background `setInterval` quota polling loop (zero idle background RPC/network requests).
+
 ## [0.3.0] - 2026-11-25
 
 ### Added
@@ -41,4 +65,5 @@ Initial open-source release.
 
 - Fixed macOS `runInBackground` default test assertion and canonical positive DER certificate serial generation in CI (`a9e3bd3`).
 
+[0.4.0]: https://github.com/moon16u/antigravity-account-switcher/releases/tag/v0.4.0
 [0.3.0]: https://github.com/moon16u/antigravity-account-switcher/releases/tag/v0.3.0

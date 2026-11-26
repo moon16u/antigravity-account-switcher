@@ -11,10 +11,14 @@ import { homedir } from 'node:os';
 import { dirname, join, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
+// This hook must stay dependency-free (Node builtins only): it runs on every
+// invocation and must start in well under 15ms with no resident memory.
 const MAX_JSON_BYTES = 64 * 1024;
 const SNAPSHOT_STALE_MS = 15 * 60 * 1000;
+const DEFAULT_TRIGGER_MIN_INTERVAL_MS = 60_000;
 const MAX_STATE_CONVERSATIONS = 50;
 const EMPTY_RESPONSE = Object.freeze({ injectSteps: [] });
+const POST_INVOCATION_RESPONSE = Object.freeze({});
 
 function isRegularNonSymlinkFile(filePath) {
   try {
@@ -103,7 +107,35 @@ export function resolveHookDataDir(env = process.env) {
   return resolve(env?.PLUGIN_DATA || join(appDataDir, 'plugin_data', 'antigravity-account-switcher'));
 }
 
-function formatAlertMessage(snapshot, settings, conversationId) {
+function readHookSettings(settingsPath) {
+  const raw = readSafeJson(settingsPath) || {};
+  const rawThreshold = Number(raw.thresholdPercent);
+  return {
+    alertEnabled: raw.alertEnabled === undefined ? true : Boolean(raw.alertEnabled),
+    autoSwitchEnabled: Boolean(raw.autoSwitchEnabled),
+    autoResumeEnabled: Boolean(raw.autoResumeEnabled),
+    thresholdPercent: Number.isFinite(rawThreshold)
+      ? Math.min(50, Math.max(1, Math.round(rawThreshold)))
+      : 10,
+  };
+}
+
+function normalizeAlertLevel(snapshot) {
+  const raw = typeof snapshot?.level === 'string' ? snapshot.level.trim().toLowerCase() : '';
+  if (raw === 'soft' || raw === 'hard' || raw === 'ok') return raw;
+  // Backwards compatibility: a triggered legacy snapshot without a level is a
+  // hard alert, not a soft one.
+  return snapshot?.triggered ? 'hard' : 'ok';
+}
+
+function firstFiniteNumber(values) {
+  for (const value of values) {
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+  }
+  return null;
+}
+
+function formatRemainingParts(snapshot) {
   const parts = [];
   const buckets = Array.isArray(snapshot.triggeredBuckets) ? snapshot.triggeredBuckets : [];
   if (buckets.includes('gemini-weekly') && typeof snapshot.weeklyPercent === 'number') {
@@ -113,103 +145,189 @@ function formatAlertMessage(snapshot, settings, conversationId) {
     parts.push(`5小时额度剩余 ${snapshot.fiveHourPercent}%`);
   }
   if (parts.length === 0) {
-    parts.push(`Gemini 额度已降至阈值 (${snapshot.thresholdPercent ?? 10}%) 以下`);
+    if (typeof snapshot.weeklyPercent === 'number') {
+      parts.push(`周额度剩余 ${snapshot.weeklyPercent}%`);
+    }
+    if (typeof snapshot.fiveHourPercent === 'number') {
+      parts.push(`5小时额度剩余 ${snapshot.fiveHourPercent}%`);
+    }
   }
-
-  const acctText = snapshot.activeMaskedEmail ? `（当前账号: ${snapshot.activeMaskedEmail}）` : '';
-  const cand = snapshot.bestCandidate;
-  let backupText = '';
-  if (cand && cand.id) {
-    const candName = cand.label ? `${cand.label} / ${cand.maskedEmail}` : cand.maskedEmail;
-    const qParts = [];
-    if (typeof cand.weeklyPercent === 'number') qParts.push(`周 ${cand.weeklyPercent}%`);
-    if (typeof cand.fiveHourPercent === 'number') qParts.push(`5h ${cand.fiveHourPercent}%`);
-    backupText = `；可用满血备用号: ${candName}${qParts.length ? ` (${qParts.join(', ')})` : ''} [id=${cand.id}]`;
+  if (parts.length === 0) {
+    parts.push('Gemini 额度已降至预警阈值以下');
   }
-
-  const cidPart = conversationId ? `；当前会话 conversationId="${conversationId}"` : '';
-  const actionText = settings.autoSwitchEnabled
-    ? `已开启「低额度自动切号」${settings.autoResumeEnabled ? '与「重启自动唤醒续跑」' : ''}：请先安全收尾当前正在写的步骤，然后调用 MCP 工具 antigravity-account-switcher_switcher/switch_account（传入 pickBest: true${conversationId ? `, conversationId: "${conversationId}"` : ''}）切换备用号（若返回有其他活跃对话或终端在运行，切勿擅自传 force: true，请先询问用户）。`
-    : `当前为提醒模式：请在回复中告知用户上述低额度状态${cand ? '及推荐备用号' : ''}，并询问是否现在调用 switch_account 切号重启${conversationId ? `（切号时传入 conversationId: "${conversationId}" 以排除当前会话）` : ''}。`;
-
-  return `[Account Switcher 低额度预警] ${parts.join('、')}${acctText}${backupText}${cidPart}。${actionText}`;
+  return parts;
 }
 
-export function evaluateHookInput(input = {}, env = process.env, { nowMs = Date.now() } = {}) {
-  try {
-    const dataDir = resolveHookDataDir(env);
-    const settingsPath = assertInsideDir(dataDir, join(dataDir, 'settings.json'));
-    const snapshotPath = assertInsideDir(dataDir, join(dataDir, 'quota-alert.json'));
-    const hookStatePath = assertInsideDir(dataDir, join(dataDir, 'hook-alert-state.json'));
+function formatCandidateText(candidate, level) {
+  if (!candidate || typeof candidate !== 'object' || !candidate.id) return '';
+  const candName = candidate.label
+    ? `${candidate.label} / ${candidate.maskedEmail || ''}`.trim()
+    : candidate.maskedEmail || candidate.id;
+  const quotaParts = [];
+  if (typeof candidate.weeklyPercent === 'number') quotaParts.push(`周 ${candidate.weeklyPercent}%`);
+  if (typeof candidate.fiveHourPercent === 'number') quotaParts.push(`5h ${candidate.fiveHourPercent}%`);
 
-    const rawSettings = readSafeJson(settingsPath) || {};
-    const settings = {
-      alertEnabled: rawSettings.alertEnabled === undefined ? true : Boolean(rawSettings.alertEnabled),
-      autoSwitchEnabled: Boolean(rawSettings.autoSwitchEnabled),
-      autoResumeEnabled: Boolean(rawSettings.autoResumeEnabled),
-    };
-    if (!settings.alertEnabled) {
-      return EMPTY_RESPONSE;
-    }
+  const noteParts = [];
+  if (candidate.estimatedReset || candidate.estimatedAnyReset) {
+    noteParts.push('额度可能已按重置时间回升，基于本地快照估算');
+  } else if (candidate.source === 'snapshot' || candidate.capturedAt) {
+    noteParts.push('基于本地快照');
+  }
+  const note = noteParts.length ? `（${noteParts.join('；')}）` : '';
+  const prefix = level === 'soft' ? '；备用候选' : '；可用满血备用号';
+  return `${prefix}: ${candName}${quotaParts.length ? ` (${quotaParts.join(', ')})` : ''} [id=${candidate.id}]${note}`;
+}
 
-    const snapshot = readSafeJson(snapshotPath);
-    if (!snapshot || snapshot.v !== 1) {
-      return EMPTY_RESPONSE;
-    }
-    const updatedMs = Date.parse(String(snapshot.updatedAt || ''));
-    if (!Number.isFinite(updatedMs) || nowMs - updatedMs > SNAPSHOT_STALE_MS) {
-      return EMPTY_RESPONSE;
-    }
+function formatAlertMessage(snapshot, settings, conversationId, level) {
+  const remaining = formatRemainingParts(snapshot);
+  const acctText = snapshot.activeMaskedEmail ? `（当前账号: ${snapshot.activeMaskedEmail}）` : '';
+  const candidateText = formatCandidateText(snapshot.bestCandidate, level);
+  const cidPart = conversationId ? `；当前会话 conversationId="${conversationId}"` : '';
 
-    const cid = typeof input?.conversationId === 'string' ? input.conversationId.trim() : '';
-    const state = readSafeJson(hookStatePath);
-    const conversations =
-      state?.v === 1 && state.conversations && typeof state.conversations === 'object' && !Array.isArray(state.conversations)
-        ? { ...state.conversations }
-        : {};
+  if (level === 'soft') {
+    const softThreshold =
+      firstFiniteNumber([
+        snapshot.softThresholdPercent,
+        snapshot.softThreshold,
+        snapshot.sessionThresholds?.softThreshold,
+        snapshot.thresholdPercent,
+        settings.thresholdPercent,
+      ]) ?? settings.thresholdPercent;
+    return `[Account Switcher 软性收尾预警] ${remaining.join('、')}${acctText}；软性收尾阈值 ${softThreshold}%${candidateText}${cidPart}。当前账号额度已进入收尾预警区，请优先完成当前最小可验证子步骤并保持工作区干净，避免开启新的大型重构或长链路操作，准备在合适断点切换账号。`;
+  }
 
-    if (!snapshot.triggered) {
-      if (cid && Object.prototype.hasOwnProperty.call(conversations, cid)) {
-        delete conversations[cid];
-        atomicWriteJson(hookStatePath, { v: 1, conversations });
-      }
-      return EMPTY_RESPONSE;
-    }
+  const hardFloor =
+    firstFiniteNumber([
+      snapshot.hardFloorPercent,
+      snapshot.hardFloor,
+      snapshot.sessionThresholds?.hardFloor,
+      snapshot.thresholdPercent,
+      settings.thresholdPercent,
+    ]) ?? settings.thresholdPercent;
+  const actionText = settings.autoSwitchEnabled
+    ? `已开启「低额度自动切号」${settings.autoResumeEnabled ? '与「重启自动唤醒续跑」' : ''}：请先安全完成当前原子写入/步骤，然后调用 MCP 工具 antigravity-account-switcher_switcher/switch_account（传入 pickBest: true${conversationId ? `, conversationId: "${conversationId}"` : ''}）切换备用号（若返回有其他活跃对话或终端在运行，切勿擅自传 force: true，请先询问用户确认）。`
+    : `当前为提醒模式：请在回复中告知用户上述低额度状态${snapshot.bestCandidate ? '及推荐备用号' : ''}，并询问是否现在调用 switch_account 切号重启${conversationId ? `（切号时传入 conversationId: "${conversationId}" 以排除当前会话）` : ''}。`;
 
-    const triggeredIds = Array.isArray(snapshot.triggeredBuckets)
-      ? [...snapshot.triggeredBuckets].filter((b) => typeof b === 'string').sort().join(',')
-      : '';
-    const acctKey = String(snapshot.activeAccountId || snapshot.activeMaskedEmail || 'active');
-    const sig = `${acctKey}|${triggeredIds}|${settings.autoSwitchEnabled ? 1 : 0}|${settings.autoResumeEnabled ? 1 : 0}`;
+  return `[Account Switcher 低额度预警] ${remaining.join('、')}${acctText}；硬性阈值 ${hardFloor}%${candidateText}${cidPart}。${actionText}`;
+}
 
-    if (cid && conversations[cid]?.sig === sig) {
-      return EMPTY_RESPONSE;
-    }
+function handlePostInvocation(input, env, { nowMs, triggerMinIntervalMs }) {
+  const dataDir = resolveHookDataDir(env);
+  const settingsPath = assertInsideDir(dataDir, join(dataDir, 'settings.json'));
+  const settings = readHookSettings(settingsPath);
+  if (!settings.alertEnabled) {
+    return POST_INVOCATION_RESPONSE;
+  }
 
-    if (cid) {
-      conversations[cid] = { sig, alertedAt: new Date(nowMs).toISOString() };
-      const entries = Object.entries(conversations);
-      if (entries.length > MAX_STATE_CONVERSATIONS) {
-        entries.sort((a, b) => Date.parse(String(b[1]?.alertedAt || '')) - Date.parse(String(a[1]?.alertedAt || '')));
-        const trimmed = Object.fromEntries(entries.slice(0, MAX_STATE_CONVERSATIONS));
-        atomicWriteJson(hookStatePath, { v: 1, conversations: trimmed });
-      } else {
-        atomicWriteJson(hookStatePath, { v: 1, conversations });
-      }
-    }
+  const triggerPath = assertInsideDir(dataDir, join(dataDir, 'quota-refresh-trigger.json'));
+  const trigger = readSafeJson(triggerPath);
+  const requestedMs = trigger ? Date.parse(String(trigger.requestedAt || '')) : NaN;
+  const minIntervalMs =
+    typeof triggerMinIntervalMs === 'number' && Number.isFinite(triggerMinIntervalMs) && triggerMinIntervalMs >= 0
+      ? triggerMinIntervalMs
+      : DEFAULT_TRIGGER_MIN_INTERVAL_MS;
 
-    return {
-      injectSteps: [
-        {
-          systemMessage: {
-            systemMessage: formatAlertMessage(snapshot, settings, cid),
-            metadata: { source: 'antigravity-account-switcher/quota-guard' },
-          },
-        },
-      ],
-    };
-  } catch {
+  if (Number.isFinite(requestedMs) && nowMs - requestedMs < minIntervalMs) {
+    return POST_INVOCATION_RESPONSE;
+  }
+
+  const cid = typeof input?.conversationId === 'string' ? input.conversationId.trim() : '';
+  atomicWriteJson(triggerPath, {
+    v: 1,
+    event: 'PostInvocation',
+    conversationId: cid,
+    requestedAt: new Date(nowMs).toISOString(),
+  });
+  // PostInvocation never injects steps and never performs network/LS RPC calls.
+  return POST_INVOCATION_RESPONSE;
+}
+
+function handlePreInvocation(input, env, { nowMs }) {
+  const dataDir = resolveHookDataDir(env);
+  const settingsPath = assertInsideDir(dataDir, join(dataDir, 'settings.json'));
+  const snapshotPath = assertInsideDir(dataDir, join(dataDir, 'quota-alert.json'));
+  const hookStatePath = assertInsideDir(dataDir, join(dataDir, 'hook-alert-state.json'));
+
+  const settings = readHookSettings(settingsPath);
+  if (!settings.alertEnabled) {
     return EMPTY_RESPONSE;
+  }
+
+  const snapshot = readSafeJson(snapshotPath);
+  if (!snapshot || snapshot.v !== 1) {
+    return EMPTY_RESPONSE;
+  }
+  const updatedMs = Date.parse(String(snapshot.updatedAt || ''));
+  if (!Number.isFinite(updatedMs) || nowMs - updatedMs > SNAPSHOT_STALE_MS) {
+    return EMPTY_RESPONSE;
+  }
+
+  const cid = typeof input?.conversationId === 'string' ? input.conversationId.trim() : '';
+  const state = readSafeJson(hookStatePath);
+  const conversations =
+    state?.v === 1 && state.conversations && typeof state.conversations === 'object' && !Array.isArray(state.conversations)
+      ? { ...state.conversations }
+      : {};
+
+  const level = normalizeAlertLevel(snapshot);
+  if (!snapshot.triggered || level === 'ok') {
+    if (cid && Object.prototype.hasOwnProperty.call(conversations, cid)) {
+      delete conversations[cid];
+      atomicWriteJson(hookStatePath, { v: 1, conversations });
+    }
+    return EMPTY_RESPONSE;
+  }
+
+  const triggeredIds = Array.isArray(snapshot.triggeredBuckets)
+    ? [...snapshot.triggeredBuckets].filter((b) => typeof b === 'string').sort().join(',')
+    : '';
+  const acctKey = String(snapshot.activeAccountId || snapshot.activeMaskedEmail || 'active');
+  // Level is part of the signature so a conversation alerted at 'soft' alerts
+  // again when it later drops to 'hard', while same-level duplicates stay quiet.
+  const sig = `${acctKey}|${level}|${triggeredIds}|${settings.autoSwitchEnabled ? 1 : 0}|${settings.autoResumeEnabled ? 1 : 0}`;
+
+  if (cid && conversations[cid]?.sig === sig) {
+    return EMPTY_RESPONSE;
+  }
+
+  if (cid) {
+    conversations[cid] = { sig, alertedAt: new Date(nowMs).toISOString() };
+    const entries = Object.entries(conversations);
+    if (entries.length > MAX_STATE_CONVERSATIONS) {
+      entries.sort((a, b) => Date.parse(String(b[1]?.alertedAt || '')) - Date.parse(String(a[1]?.alertedAt || '')));
+      const trimmed = Object.fromEntries(entries.slice(0, MAX_STATE_CONVERSATIONS));
+      atomicWriteJson(hookStatePath, { v: 1, conversations: trimmed });
+    } else {
+      atomicWriteJson(hookStatePath, { v: 1, conversations });
+    }
+  }
+
+  return {
+    injectSteps: [
+      {
+        systemMessage: {
+          systemMessage: formatAlertMessage(snapshot, settings, cid, level),
+          metadata: { source: 'antigravity-account-switcher/quota-guard', level },
+        },
+      },
+    ],
+  };
+}
+
+export function evaluateHookInput(
+  input = {},
+  env = process.env,
+  { nowMs = Date.now(), triggerMinIntervalMs = DEFAULT_TRIGGER_MIN_INTERVAL_MS } = {}
+) {
+  const currentMs = Number.isFinite(nowMs) ? nowMs : Date.now();
+  const eventName = typeof input?.hookEventName === 'string' ? input.hookEventName.trim() : '';
+  try {
+    if (eventName === 'PostInvocation') {
+      return handlePostInvocation(input, env, { nowMs: currentMs, triggerMinIntervalMs });
+    }
+    return handlePreInvocation(input, env, { nowMs: currentMs });
+  } catch {
+    return eventName === 'PostInvocation' ? POST_INVOCATION_RESPONSE : EMPTY_RESPONSE;
   }
 }
 

@@ -1,8 +1,8 @@
 {
   "name": "antigravity-account-switcher",
   "displayName": "Account Switcher",
-  "version": "0.3.0",
-  "description": "Manage multiple local OAuth accounts for Google Antigravity 2.0 across Windows, WSL2, macOS, and Linux with encrypted credential storage and safe account switching.",
+  "version": "0.4.0",
+  "description": "Local-first management of multiple Google Antigravity 2.0 accounts with AES-256-GCM encrypted credential storage, official native Google sign-in, local quota snapshots, and safe account switching across Windows, WSL2, macOS, and Linux.",
   "license": "MIT",
   "author": "moon16u",
   "homepage": "https://github.com/moon16u/antigravity-account-switcher",
