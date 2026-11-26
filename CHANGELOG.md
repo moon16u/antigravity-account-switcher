@@ -6,34 +6,35 @@ All notable changes to **Antigravity Account Switcher** are documented in this f
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.4.0] - 2026-11-26
+## [0.4.0] - 2026-11-27
 
-Low-Risk Architecture Hardening: the plugin is now fully local-first, makes no direct outbound Google API calls, performs no runtime binary OAuth extraction, and runs no idle background polling.
+Low-risk, local-first architecture overhaul: eliminates all outbound remote Google API requests, runtime binary OAuth extraction, and idle background polling while tightening Agent permission boundaries and refining the Advanced Settings UI.
 
 ### Added
 
-- Local-first quota snapshot cache and reset-countdown projection (`sidecars/switcher/quota-snapshots.mjs`, `quota-snapshots.json`): only the active account queries the local `language_server` RPC (`RetrieveUserQuotaSummary`), pre-switch final snapshots are captured automatically (best-effort), and inactive accounts render local snapshots with `Estimated reset` / `Est. 100%` projection plus a >24h staleness indicator, with zero remote requests.
-- Conversation-lifecycle event-driven quota checks: the `PostInvocation` hook (`hooks.json`, `scripts/quota-hook.mjs`) writes a throttled local trigger file (`quota-refresh-trigger.json`) watched by the Sidecar through `fs.watch`, eliminating idle heartbeat polling while keeping hooks non-blocking.
-- Non-mechanical dynamic threshold range (per-session jittered soft wrap-up threshold + hard floor, `dynamicThresholdEnabled`, default on) and natural relaunch pause (random 3–8s delay before relaunch, `naturalPauseEnabled`, default on).
-- Opt-in toggle `skipOnboardingPrompt` (**default OFF**) in the **Advanced Settings** panel to control whether `switcher-worker` updates `app_storage.json` (`agy.onboarding.lastLoginUsername`) to skip repeated onboarding modals.
+- **Local quota snapshots & reset-time projection** (`sidecars/switcher/quota-snapshots.mjs`, `quota-snapshots.json`): only the active account queries local `language_server` RPC (`RetrieveUserQuotaSummary`), with automatic best-effort final snapshot capture before switching. Inactive accounts render locally with `Est. reset` / `Est. 100%` projection and a >24h staleness hint — zero remote requests.
+- **Event-driven quota monitoring**: `PostInvocation` hook (`hooks.json`, `scripts/quota-hook.mjs`) writes a throttled trigger file (`quota-refresh-trigger.json`) watched by the Sidecar via `fs.watch`, removing idle heartbeat polling while keeping hooks non-blocking.
+- **Dynamic thresholds & natural relaunch pause**: per-session jittered soft wrap-up and hard floor bounds (`dynamicThresholdEnabled`, default on) plus a random `3–8s` pause before desktop relaunch (`naturalPauseEnabled`, default on).
+- **Opt-in onboarding skip toggle**: `skipOnboardingPrompt` (**default OFF**) in **Advanced Settings** lets users explicitly choose whether to update local onboarding state on switch.
+- **Dedicated settings rate-limit countdown**: `/api/settings/update` uses a dedicated `25 req/min` limiter returning `Retry-After` and `retryAfterSec`, displayed as a gentle amber cooldown notice in the sidebar.
+- **Expanded test suite**: 59 isolated unit and integration tests passing in both standard and `--use-env-proxy` modes across 6-matrix CI.
 
 ### Changed
 
-- **Agent Autonomous Switch** (`Agent 自主切号`, default OFF) now acts as a hard, fail-closed MCP permission gate: when OFF, the Agent keeps read-only access (status, quota, alerts) and `switch_account` is rejected at the MCP server layer with `AGENT_SWITCH_DISABLED`. **Auto-Resume After Switch** is coupled to this gate: it is automatically disabled and greyed out in the UI while autonomous switching is off; when ON, the Agent may switch on user request or at the low-quota hard floor (still guarded by active-work detection) and **Auto-Resume After Switch** can be toggled independently.
-- Promoted native sign-in (`+ Add Account` → back up the active account, restart into official Google sign-in, then click `Save Account`) as the primary and sole account addition flow.
-- Updated the MCP server (`0.4.0`) `get_quota` and `switch_account` (`pickBest: true`) to use local snapshots plus reset projection (with a least-recently-used unsnapshotted fallback) and to capture pre-switch snapshots before switching.
-- Updated the `PreInvocation` hook to emit level-aware alerts (`soft` wrap-up reminder vs `hard` switch prompt) with per-level conversation deduplication.
-- Renamed the sidebar settings entry to **Advanced Settings** and refreshed it with concise setting titles, hover-only `ⓘ` info/risk tooltips, and right-aligned instant **On / Off** toggle buttons consistent with the Saved Accounts action controls.
+- **Hard MCP permission gate (`Agent Autonomous Switch`, default OFF)**: renamed from `Agent Auto-Switch` and enforced fail-closed at the MCP server layer (`AGENT_SWITCH_DISABLED` when off, keeping the Agent strictly read-only). **Auto-Resume After Switch** is now coupled to this gate and automatically disabled and greyed out whenever autonomous switching is off.
+- **Official native sign-in as the sole add-account flow**: `+ Add Account` backs up the active account, restarts Antigravity signed out for official Google sign-in, and saves the new session via `Save Account`.
+- **MCP server (`0.4.0`) & level-aware `PreInvocation` hook**: `get_quota` and `switch_account` (`pickBest: true`) now rely on local snapshots and reset projection (with least-recently-used unsnapshotted fallback); `PreInvocation` distinguishes `soft` wrap-up alerts from `hard` switch alerts with per-level conversation deduplication.
+- **Redesigned Advanced Settings UI**: concise setting titles, subtle hover-only `ⓘ` tooltips with unified `Low risk:` / `Medium risk:` labels, right-aligned instant `Off / On` segmented controls (optimistic per-row updates with zero panel flicker), and **Alert Threshold** placed at the bottom.
 
 ### Fixed
 
-- **Save Account** is available on native Windows when the language server identifies an unsaved account. Panel loads start zero child processes. Saving or backing up before a switch or **+ Add Account** reads `gemini:antigravity` from Credential Manager when the token file is missing. The reader prefers Python `ctypes` (`CredReadW`), then tries `pwsh` and `powershell.exe` without `-WindowStyle Hidden` or `-EncodedCommand`.
+- **Native Windows Save Account & pre-switch backup**: panel loads remain zero-subprocess while showing **Save Account** whenever the local `language_server` reports an unsaved active account. Saving or backing up reads `gemini:antigravity` from Windows Credential Manager on demand via Python `ctypes` (`CredReadW`), falling back to plain `pwsh` / `powershell.exe` without `-WindowStyle Hidden` or `-EncodedCommand`, and aborts safely before restart if reading is blocked.
 
 ### Removed
 
-- Removed all direct remote `v1internal:loadCodeAssist` / `v1internal:retrieveUserQuotaSummary` HTTP calls and custom `antigravity/hub/<ver>` User-Agent construction (`cloudcode.mjs` removed).
-- Removed runtime binary OAuth client extraction (`binary-oauth.mjs`) and the self-hosted browser PKCE OAuth flow (`oauth.mjs`, `/api/oauth/*`, `/api/accounts/sync-tiers`).
-- Removed the 60-second background `setInterval` quota polling loop (zero idle background RPC/network requests).
+- Removed all direct remote `v1internal:loadCodeAssist` / `v1internal:retrieveUserQuotaSummary` calls and custom `antigravity/hub/<ver>` User-Agent headers (`cloudcode.mjs`).
+- Removed runtime binary OAuth client extraction (`binary-oauth.mjs`) and self-hosted browser PKCE OAuth (`oauth.mjs`, `/api/oauth/*`, `/api/accounts/sync-tiers`).
+- Removed the 60-second background `setInterval` quota polling loop.
 
 ## [0.3.0] - 2026-11-25
 

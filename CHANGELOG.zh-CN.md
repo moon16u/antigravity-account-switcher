@@ -6,34 +6,35 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本（Semantic Versioning）](https://semver.org/lang/zh-CN/)。
 
-## [0.4.0] - 2026-11-26
+## [0.4.0] - 2026-11-27
 
-低风险架构加固：插件全面转向本地优先，不再直接发起任何 Google 远端 API 调用，不在运行时提取二进制 OAuth 客户端，也不进行空闲后台轮询。
+低风险本地优先架构重构：彻底移除远端 Google API 直连、运行时二进制 OAuth 提取与空闲后台轮询，收紧 Agent 切号权限边界，并重塑「高级设置」交互体验。
 
 ### 新增
 
-- 新增本地优先的配额快照缓存与重置倒计时投影（`sidecars/switcher/quota-snapshots.mjs`、`quota-snapshots.json`）：仅当前活跃账号通过本地 `language_server` RPC（`RetrieveUserQuotaSummary`）查询配额，切号前自动采集最终快照（尽最大努力）；非活跃账号直接渲染本地快照，并给出「预计已重置 / 预计 100%」投影与超过 24 小时的陈旧提示，全程零远端请求。
-- 新增对话生命周期事件驱动的配额检查：`PostInvocation` Hook（`hooks.json`、`scripts/quota-hook.mjs`）写入节流的本地触发文件（`quota-refresh-trigger.json`），由 Sidecar 通过 `fs.watch` 监听，消除空闲心跳轮询，同时保持 Hook 非阻塞。
-- 新增非机械式动态阈值区间（按会话随机抖动的软收尾阈值 + 硬下限，`dynamicThresholdEnabled` 默认开启）与自然重启停顿（重启前随机 3–8 秒延迟，`naturalPauseEnabled` 默认开启）。
-- **高级设置**面板新增可选开关 `skipOnboardingPrompt`（**默认关闭**），用于控制 `switcher-worker` 是否更新 `app_storage.json`（`agy.onboarding.lastLoginUsername`）以跳过重复的引导弹窗。
+- **本地配额快照与重置倒计时推算**（`sidecars/switcher/quota-snapshots.mjs`、`quota-snapshots.json`）：仅当前活跃账号调用本地 `language_server` RPC（`RetrieveUserQuotaSummary`），切号前自动采集一次终态快照；非活跃账号完全本地展示，过期的重置窗口标注「预计已重置 / 预计 100%」，超过 24 小时的快照显示温和提示，全程零远端请求。
+- **对话周期事件驱动监测**：新增 `PostInvocation` Hook（`hooks.json`、`scripts/quota-hook.mjs`），按节流写入本地触发文件（`quota-refresh-trigger.json`）并由 Sidecar 通过 `fs.watch` 异步监听，消除空闲心跳轮询且不阻塞对话。
+- **动态阈值区间与切号自然停顿**：支持会话级随机浮动的软收尾与硬下限阈值（`dynamicThresholdEnabled`，默认开启），以及切号重启前随机 `3–8 秒` 自然停顿（`naturalPauseEnabled`，默认开启）。
+- **可选「跳过重复条款弹窗」开关**：在「高级设置」中新增 `skipOnboardingPrompt`（**默认关闭**），由用户自主决定切号时是否同步更新本地引导记录。
+- **高级设置独立限流与冷却倒计时**：`/api/settings/update` 使用独立 `25 次/分` 限流并返回 `Retry-After` / `retryAfterSec`，触发保护时以柔和提示显示剩余等待秒数。
+- **扩充测试覆盖**：双模式（标准与 `--use-env-proxy`）全隔离测试增至 **59 项**，覆盖 6 矩阵 CI。
 
 ### 变更
 
-- **Agent 自主切号**（`Agent Autonomous Switch`，`autoSwitchEnabled`，默认关闭）现作为 MCP 层硬性、失败关闭（fail-closed）的权限门禁：关闭时 Agent 仅保留只读权限（状态、配额与低额度提醒），`switch_account` 会在 MCP 服务层以 `AGENT_SWITCH_DISABLED` 拒绝执行。**切号后自动续跑**（`Auto-Resume After Switch`）与该门禁联动：自主切号关闭时，该选项会被自动关闭并在界面中置灰禁用；开启后，Agent 可在用户明确要求时或触及低额度硬下限时执行切号（仍受活跃任务检测护栏约束），**切号后自动续跑** 也可独立开关。
-- 将原生登录提升为唯一且主要的添加账号流程（`+ 添加账号` → 备份当前账号、重启进入官方 Google 登录，登录后点击「保存当前账号」）。
-- MCP 服务（`0.4.0`）的 `get_quota` 与 `switch_account`（`pickBest: true`）改为使用本地快照 + 重置时间投影（并附「最近最少使用且无快照」的备用号回退），同时在切号前采集当前账号快照。
-- `PreInvocation` Hook 改为分级提醒（`soft` 收尾提醒 / `hard` 切号提示），并按会话与级别去重。
-- 侧栏设置项更名为 **高级设置**，并采用精简的设置标题、仅在悬停时显示的 `ⓘ` 信息/风险提示，以及右对齐的即时「开启 / 关闭」切换按钮，与「已保存账号」卡片的操作控件保持一致。
+- **「Agent 自主切号」硬权限门禁（默认关闭）**：由原「Agent 自动切号」更名并升级为 MCP 服务层 fail-closed 硬拦截——关闭时 Agent 仅具只读权限，`switch_account` 直接返回 `AGENT_SWITCH_DISABLED`；**「切号后自动续跑」** 与之强联动，在关闭时自动关闭并置灰禁用，开启后可自由切换。
+- **官方原生登录扶正为唯一添加方式**：`+ 添加账号` 自动备份当前账号并重启桌面端应用进入官方 Google 登录，登录后点击「保存当前账号」加密入库。
+- **MCP 服务（`0.4.0`）与分级 `PreInvocation` Hook**：`get_quota` 与 `switch_account`（`pickBest: true`）改用本地快照与重置推算（无快照时回退至最久未用备用号）；`PreInvocation` 区分 `soft` 收尾提醒与 `hard` 下限提醒，并按会话与级别去重。
+- **重塑「高级设置」界面**：更名为「高级设置」，保留精简纯标题、仅悬停 `ⓘ` 显示的「低风险：/ 中风险：」说明气泡、右对齐即时「关闭 / 开启」左右分段切换控件（局部乐观更新、零界面闪烁），并将「触发阈值」统一置于面板底部。
 
 ### 修复
 
-- Windows 原生端通过语言服务器识别出尚未保存的账号后，即可点击「**保存当前账号**」。面板加载时不启动任何子进程。保存账号、切号或「**+ 添加账号**」前备份时，若令牌文件不存在，插件会从凭据管理器按需读取 `gemini:antigravity`。优先使用 Python `ctypes`（`CredReadW`），失败后依次尝试 `pwsh` 和 `powershell.exe`，不使用 `-WindowStyle Hidden` 或 `-EncodedCommand`。
+- **Windows 原生保存账号与切号前备份**：打开或刷新面板保持零子进程，只要 `language_server` 识别出未入库的活跃账号即可直接点击「保存当前账号」；保存账号及切号前自动备份按需从 Windows 凭据管理器读取 `gemini:antigravity`（优先 Python `ctypes` `CredReadW`，不可用时回退至不含 `-WindowStyle Hidden` / `-EncodedCommand` 的 `pwsh` / `powershell.exe`），若读取受阻则在重启前安全中止。
 
 ### 移除
 
-- 移除所有直接请求远端 `v1internal:loadCodeAssist` / `v1internal:retrieveUserQuotaSummary` 的 HTTP 调用及自定义 `antigravity/hub/<ver>` User-Agent 构造（删除 `cloudcode.mjs`）。
-- 移除运行时二进制 OAuth 客户端提取（`binary-oauth.mjs`）与自托管浏览器 PKCE OAuth 流程（`oauth.mjs`、`/api/oauth/*`、`/api/accounts/sync-tiers`）。
-- 移除每 60 秒后台 `setInterval` 配额轮询循环（空闲时零后台 RPC / 网络请求）。
+- 移除所有直接请求远端 `v1internal:loadCodeAssist` / `v1internal:retrieveUserQuotaSummary` 的 HTTP 调用与自定义 `antigravity/hub/<ver>` User-Agent（删除 `cloudcode.mjs`）。
+- 移除运行时二进制 OAuth 客户端提取（`binary-oauth.mjs`）与自建浏览器 PKCE OAuth 流程（`oauth.mjs`、`/api/oauth/*`、`/api/accounts/sync-tiers`）。
+- 移除 60 秒后台 `setInterval` 定时轮询。
 
 ## [0.3.0] - 2026-11-25
 
