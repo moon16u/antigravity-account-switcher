@@ -141,7 +141,7 @@ function createTestSidecarSdk() {
             method: req.method, headers: req.headers, body: chunks.length ? Buffer.concat(chunks) : undefined,
           }));
           res.writeHead(result.status, Object.fromEntries(result.headers));
-          res.end(await result.text());
+          res.end(Buffer.from(await result.arrayBuffer()));
         } catch {
           res.writeHead(500);
           res.end();
@@ -324,7 +324,7 @@ test('HTTP sidecar routes: security headers, auth fail-close, rate limit, CRUD &
 
 
   // Static pages & headers
-  for (const route of ['/', '/styles.css', '/app.js']) {
+  for (const route of ['/', '/styles.css', '/app.js', '/fonts/GoogleSans-Latin.woff2']) {
     const res = await request(route);
     assert.equal(res.status, 200);
     const csp = res.headers.get('content-security-policy') || '';
@@ -333,6 +333,11 @@ test('HTTP sidecar routes: security headers, auth fail-close, rate limit, CRUD &
     assert.equal(csp.includes('unsafe-eval'), false);
     assert.equal(res.headers.get('x-content-type-options'), 'nosniff');
     assert.equal(res.headers.get('cache-control'), 'no-store');
+    if (route.endsWith('.woff2')) {
+      assert.equal(res.headers.get('content-type'), 'font/woff2');
+      const magic = Buffer.from(await res.arrayBuffer()).subarray(0, 4).toString('ascii');
+      assert.equal(magic, 'wOF2');
+    }
   }
 
   // Missing token rejected (401)
@@ -1864,36 +1869,57 @@ test('public UI uses external assets and local quota and native account controls
     assert.match(attrs, /\ssrc\s*=\s*["']\/(?!\/)/i);
     assert.equal(body.trim(), '');
   }
-  for (const id of [
+  for (const asset of [html, js]) {
+    assert.doesNotMatch(asset, /\.style\.|\bon\w+\s*=/i);
+    assert.doesNotMatch(asset, /\bnew-login-confirm\b/);
+  }
+  assert.match(html, /<meta name="color-scheme" content="light dark">/);
+  assert.match(css, /@font-face\s*\{[^}]*font-family:\s*"Google Sans";[^}]*url\("\/fonts\/GoogleSans-Latin\.woff2"\)/);
+  assert.doesNotMatch(css, /(?<![-\w])font-weight\s*:\s*(?:[56]\d{2}|700|bold)\b/i);
+  const main = html.match(/<main class="main-content">([\s\S]*?)<\/main>/)?.[1];
+  assert.ok(main);
+  assert.match(main, /<ul id="accounts-list" class="accounts-list"><\/ul>/);
+  assert.match(main, /<section id="tools-card"/);
+  assert.match(js, /const item = document\.createElement\('li'\);\s*item\.className = acc\.isActive/);
+  assert.match(js, /const empty = document\.createElement\('li'\);\s*empty\.className = 'empty-state'/);
+  assert.match(js, /t\('switchBtn'\),\s*'btn btn-pill btn-sm'/);
+  const addAccountButton = main.match(/<button\b[^>]*\sid="add-account-btn"[^>]*>/)?.[0];
+  assert.ok(addAccountButton);
+  assert.match(addAccountButton, /\sclass="btn btn-pill"/);
+  assert.doesNotMatch(addAccountButton, /\saria-(?:controls|expanded)\s*=/);
+  const dialog = html.match(/<dialog\b[^>]*\sid="confirm-dialog"[^>]*>[\s\S]*?<\/dialog>/)?.[0];
+  assert.ok(dialog);
+  assert.match(dialog, /^<dialog\b[^>]*\sclass="confirm-dialog"[^>]*>/);
+  assert.match(dialog, /^<dialog\b[^>]*\sclosedby="any"[^>]*>/);
+  assert.match(dialog, /^<dialog\b[^>]*\saria-labelledby="confirm-dialog-title"[^>]*>/);
+  assert.match(dialog, /<h[1-6]\b[^>]*\sid="confirm-dialog-title"/);
+  assert.match(dialog, /<div\b[^>]*\sid="confirm-dialog-content"/);
+  assert.match(css, /\.confirm-dialog\s*\{/);
+  assert.match(css, /\.confirm-dialog::backdrop\s*\{/);
+  assert.match(js, /\.showModal\(\)/);
+  const toggleOrder = js.match(/const GUARD_TOGGLES = \[([\s\S]*?)\n  \];/)?.[1];
+  assert.match(toggleOrder, /guard-skip-onboarding[\s\S]*guard-auto-switch[\s\S]*guard-auto-resume/);
+  const guardSwitches = html.match(/<button\b[^>]*\srole\s*=\s*(["'])switch\1[^>]*>/gi) || [];
+  const guardSwitchIds = [
     'guard-alert-enabled',
     'guard-watch-weekly',
     'guard-watch-5h',
     'guard-dynamic-threshold',
     'guard-natural-pause',
+    'guard-skip-onboarding',
     'guard-auto-switch',
     'guard-auto-resume',
-    'guard-skip-onboarding',
-  ]) {
-    const group = html.match(new RegExp(`(<div\\b[^>]*\\sid\\s*=\\s*(["'])${id}\\2[^>]*>)([\\s\\S]*?)<\\/div>`));
-    assert.ok(group, `Missing radiogroup ${id}`);
-    assert.match(group[1], /\sclass\s*=\s*(["'])(?:[^"']*\s)?guard-segmented(?:\s[^"']*)?\1/i);
-    assert.match(group[1], /\srole\s*=\s*(["'])radiogroup\1/i);
-    const buttons = [...group[3].matchAll(/<button\b[^>]*>/gi)].map(([button]) => button);
-    assert.equal(buttons.length, 2);
-    for (const button of buttons) {
-      assert.match(button, /\stype\s*=\s*(["'])button\1/i);
-      assert.match(button, /\sclass\s*=\s*(["'])(?:[^"']*\s)?guard-seg-btn(?:\s[^"']*)?\1/i);
-      assert.match(button, /\srole\s*=\s*(["'])radio\1/i);
-      assert.match(button, /\saria-checked\s*=\s*(["'])(?:true|false)\1/);
-    }
-    assert.match(buttons[0], /\sdata-value\s*=\s*(["'])false\1/);
-    assert.match(buttons[1], /\sdata-value\s*=\s*(["'])true\1/);
-    if (id === 'guard-auto-resume') {
-      assert.match(group[1], /\saria-disabled="true"/);
-      assert.match(buttons[0], /\saria-checked="true"/);
-      assert.match(buttons[1], /\saria-checked="false"/);
-      for (const button of buttons) assert.match(button, /\sdisabled\b/);
-    }
+  ];
+  assert.deepEqual(guardSwitches.map(button => button.match(/\sid\s*=\s*(["'])([^"']+)\1/)?.[2]), guardSwitchIds);
+  for (const [index, id] of guardSwitchIds.entries()) {
+    const button = guardSwitches[index];
+    const label = id === 'guard-alert-enabled' ? 'guard-alert-label' : id + '-label';
+    const checked = id === 'guard-dynamic-threshold' || id === 'guard-natural-pause';
+    assert.match(button, /\stype\s*=\s*(["'])button\1/i);
+    assert.match(button, /\sclass\s*=\s*(["'])(?:[^"']*\s)?guard-switch(?:\s[^"']*)?\1/i);
+    assert.equal(button.match(/\saria-labelledby\s*=\s*(["'])([^"']+)\1/)?.[2], label);
+    assert.equal(button.match(/\saria-checked\s*=\s*(["'])(true|false)\1/)?.[2], String(checked));
+    assert.match(button, /\sdisabled(?=[\s=>/])/i);
     assert.ok(js.includes(id));
   }
   assert.match(html, /id="guard-auto-resume-row"[^>]*\bguard-row-disabled\b/);
@@ -1903,24 +1929,43 @@ test('public UI uses external assets and local quota and native account controls
   assert.ok(js.includes('guard-auto-resume-row'));
   assert.ok(js.includes('guard-row-disabled'));
   assert.match(css, /\.guard-row-disabled \.guard-row-label > span:first-child\s*\{\s*color: var\(--sw-fg-faint\)/);
-  assert.match(css, /\.guard-row-disabled \.guard-segmented\s*\{\s*opacity: 0\.52/);
+  assert.match(css, /\.guard-row-disabled \.guard-switch\s*\{\s*opacity: 0\.48/);
   assert.match(html, /id="guard-auto-switch-label">Agent 自主切号</);
   assert.match(js, /guardAutoSwitchLabel: 'Agent 自主切号'/);
   assert.match(js, /guardAutoSwitchLabel: 'Agent Autonomous Switch'/);
   const posSkipOnboarding = html.search(/\sid\s*=\s*(["'])guard-skip-onboarding\1/);
   const posAutoSwitch = html.search(/\sid\s*=\s*(["'])guard-auto-switch\1/);
   const posAutoResume = html.search(/\sid\s*=\s*(["'])guard-auto-resume\1/);
-  const posThreshold = html.search(/\sid\s*=\s*(["'])guard-threshold\1/);
+  const posThreshold = html.search(/<select\b[^>]*\sid\s*=\s*(["'])guard-threshold\1/);
   assert.ok(posSkipOnboarding > 0 && posSkipOnboarding < posAutoSwitch);
   assert.ok(posAutoSwitch < posAutoResume && posAutoResume < posThreshold);
   assert.doesNotMatch(html, /<input\b[^>]*\stype\s*=\s*(?:(["'])checkbox\1|checkbox(?=[\s/>]))/i);
   assert.doesNotMatch(html, /\sid\s*=\s*(?:(["'])guard-save-btn\1|guard-save-btn(?=[\s/>]))/i);
   assert.match(html, /<button\b[^>]*\sclass\s*=\s*(["'])(?:[^"']*\s)?info-tip-btn(?:\s[^"']*)?\1/i);
   assert.match(html, /<[^>]+\srole\s*=\s*(["'])tooltip\1/i);
+  const noticeStyle = css.match(/^\.notice\s*\{([^}]*)\}/m)?.[1];
+  assert.ok(noticeStyle);
+  assert.match(noticeStyle, /\bposition:\s*fixed;/);
+  assert.match(noticeStyle, /\btop:\s*31px;/);
+  assert.match(noticeStyle, /\btranslate:\s*0 -50%;/);
+  assert.match(noticeStyle, /\bwhite-space:\s*pre-line;/);
+  assert.match(noticeStyle, /\btext-align:\s*left;/);
   assert.match(css, /\.notice-warn\s*\{/);
-  assert.match(js, /showNotice\([^,\n]+,\s*'warn'/);
+  assert.doesNotMatch(js, /\bt\('notice(?:GuardSaved|Refreshed(?:Local)?)'\)/);
   assert.match(js, /err\.retryAfterSec\s*=/);
-  assert.match(js, /err\?\.status === 429 \|\| err\?\.code === 'RATE_LIMITED'/);
+  const cooldown = js.match(/if \(err\?\.status === 429 \|\| err\?\.code === 'RATE_LIMITED'\) \{([\s\S]*?)\n\s*\} else/)?.[1];
+  assert.ok(cooldown);
+  assert.match(cooldown, /t\('noticeGuardCooldown', \{ sec \}\) : t\('noticeGuardCooldownFallback'\)/);
+  assert.match(cooldown, /showNotice\(message, 'warn'/);
+  assert.match(js, /if \(res\.switching && res\.message\) \{\s*showNotice\(res\.message, 'ok'\)/);
+  assert.match(js, /if \(confirmTarget\.type === 'new-login' && res\?\.switching\) \{\s*showNotice\(t\('noticeNewLoginRestarting'\), 'ok'\)/);
+  assert.match(js, /else if \(res\?\.switching && res\.message\) \{\s*showNotice\(res\.message, 'ok'\)/);
+  assert.match(js, /showNotice\(t\('errGuardSave'\), 'err'\)/);
+  const refresh = js.match(/async function refreshAll\(\) \{([\s\S]*?)\n  \}/)?.[1];
+  assert.ok(refresh);
+  assert.match(refresh, /showNotice\(err\.message \|\| t\('errReadState'\), 'err'\)/);
+  assert.match(js, /showNotice\(err\.message \|\| t\('errActionFailed'\), 'err'\)/);
+  assert.match(js, /showNotice\(err\.message \|\| t\('errSwitchFailed'\), 'err'\)/);
   assert.ok(js.includes('/api/accounts/new-login'));
   assert.ok(js.includes('(active.present && active.valid) || (active.lsConnected && Boolean(pickDisplayEmail(active)))'));
   const saveBranch = js.match(/if \(activeDisplayEmail && !hasSavedActive && canCaptureActiveAccount\(active\)\) \{([\s\S]*?)\} else/);
@@ -1931,6 +1976,48 @@ test('public UI uses external assets and local quota and native account controls
   assert.ok(js.includes("canCaptureActiveAccount(active) ? t('emptyAccountsWithUnsaved')"));
   assert.ok(js.includes('estimatedReset'));
   assert.doesNotMatch(js, /\b(alert|confirm|prompt)\s*\(/);
+});
+
+test('settings hints share their native targets and usage tiles adapt to drawer width', () => {
+  const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  const js = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const css = readFileSync(new URL('../public/styles.css', import.meta.url), 'utf8');
+  const buttons = html.match(/<button\b[^>]*class="info-tip-btn"[^>]*>/g) || [];
+  const tips = html.match(/<span\b[^>]*class="info-tip-popover"[^>]*>/g) || [];
+  assert.ok(buttons.length > 0);
+  const ids = buttons.map(button => {
+    const id = button.match(/aria-describedby="([^"]+)"/)?.[1];
+    assert.ok(id);
+    assert.ok(button.includes('interestfor="' + id + '"'));
+    assert.ok(button.includes('popovertarget="' + id + '"'));
+    return id;
+  });
+  assert.equal(new Set(ids).size, ids.length);
+  assert.deepEqual(tips.map(tip => {
+    assert.match(tip, /popover="hint"/);
+    assert.match(tip, /role="tooltip"/);
+    return tip.match(/\bid="([^"]+)"/)?.[1];
+  }).sort(), ids.sort());
+  assert.match(js, /!\('interestForElement' in HTMLButtonElement\.prototype\)/);
+  assert.match(css, /position-area:\s*block-start/);
+  assert.match(css, /position-try-fallbacks:\s*flip-block, inline-end, flip-inline/);
+  assert.match(js, /setAttribute\('aria-label', t\('usageHeading'\)\)/);
+  assert.doesNotMatch(js, /usage-card-title/);
+  assert.match(js, /className = 'usage-buckets'/);
+  assert.match(css, /\.usage-card\s*\{[^}]*container-type:\s*inline-size/);
+  assert.match(css, /@container \(min-width: 380px\)\s*\{\s*\.usage-buckets\s*\{[^}]*repeat\(2, minmax\(0, 1fr\)\)/);
+  assert.match(css, /\.usage-buckets:has\(> :only-child\)\s*\{\s*grid-template-columns: 1fr/);
+  assert.match(css, /\.shell\s*\{[^}]*container-type:\s*inline-size/);
+  assert.match(css, /@container \(max-width: 420px\)/);
+  assert.doesNotMatch(css, /::-webkit-scrollbar|@media \(max-width: (420|440)px\)/);
+  assert.match(css, /@media \(prefers-contrast: more\)[^{]*\{\s*:root\s*\{\s*--sw-scrollbar-thumb: var\(--sw-fg\)/);
+  assert.match(css, /@supports \(appearance: base-select\)/);
+  assert.match(css, /\.tool-item::details-content\s*\{[^}]*transition-behavior: allow-discrete/);
+  assert.match(css, /@starting-style/);
+  assert.match(css, /@media \(prefers-reduced-motion: reduce\)\s*\{[^}]*\.usage-card[^}]*transition: none/);
+  assert.match(js, /setAttribute\('role', kind === 'err' \? 'alert' : 'status'\)/);
+  assert.match(js, /setAttribute\('aria-live', kind === 'err' \? 'assertive' : 'polite'\)/);
+  assert.match(js, /event\.source && event\.source !== window\.parent && event\.source !== window\) return/);
 });
 
 test('worker changes onboarding only with opt-in and applies the pause only during a real switch', async (t) => {

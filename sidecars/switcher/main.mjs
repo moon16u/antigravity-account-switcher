@@ -171,8 +171,9 @@ export async function createApp(options = {}) {
     });
   }
 
-  function assetResponse(fileName, contentType) {
-    const body = readFileSync(join(PUBLIC_DIR, fileName), 'utf8');
+  function assetResponse(fileName, contentType, encoding = 'utf8') {
+    const filePath = join(PUBLIC_DIR, fileName);
+    const body = encoding ? readFileSync(filePath, encoding) : readFileSync(filePath);
     return new Response(body, {
       status: 200,
       contentType,
@@ -314,6 +315,7 @@ export async function createApp(options = {}) {
   app.page('/', () => assetResponse('index.html', 'text/html; charset=utf-8'));
   app.api('/styles.css', () => assetResponse('styles.css', 'text/css; charset=utf-8'), 'GET');
   app.api('/app.js', () => assetResponse('app.js', 'application/javascript; charset=utf-8'), 'GET');
+  app.api('/fonts/GoogleSans-Latin.woff2', () => assetResponse('fonts/GoogleSans-Latin.woff2', 'font/woff2', null), 'GET');
 
   app.api(
     '/api/state',
@@ -510,7 +512,7 @@ export async function createApp(options = {}) {
         targetMaskedEmail: job.targetMaskedEmail,
         message:
           mode === 'switch'
-            ? `正在关闭桌面应用并切换到 ${job.targetMaskedEmail}，窗口将在数秒后自动重开…`
+            ? `正在关闭桌面应用并切换到 ${job.targetMaskedEmail}，\n窗口将在数秒后自动重开…`
             : '已备份当前账号，正在重启以进入官方 Google 登录…',
       });
     } catch (err) {

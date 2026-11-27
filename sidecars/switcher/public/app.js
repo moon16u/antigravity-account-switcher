@@ -10,10 +10,15 @@
     ['guard-watch-5h', 'watch5h'],
     ['guard-dynamic-threshold', 'dynamicThresholdEnabled', true],
     ['guard-natural-pause', 'naturalPauseEnabled', true],
+    ['guard-skip-onboarding', 'skipOnboardingPrompt'],
     ['guard-auto-switch', 'autoSwitchEnabled'],
     ['guard-auto-resume', 'autoResumeEnabled'],
-    ['guard-skip-onboarding', 'skipOnboardingPrompt'],
   ];
+  const CONFIRM_TEXT = {
+    switch: ['confirmSwitchTitle', 'confirmSwitchMsg', 'confirmSwitchBtn'],
+    remove: ['confirmRemoveTitle', 'confirmRemoveMsg', 'confirmRemoveBtn'],
+    'new-login': ['confirmNewLoginTitle', 'newLoginConfirmMsg', 'newLoginConfirmBtn'],
+  };
 
   const I18N = {
     zh: {
@@ -65,13 +70,16 @@
       renamePlaceholder: '输入新别名（留空则清除别名）',
       saveBtn: '保存',
       cancelBtn: '取消',
+      confirmSwitchTitle: '切换账号',
       confirmSwitchMsg: '确认切换到「{name}」？将先备份当前账号并重启 Antigravity 窗口。',
       confirmSwitchBtn: '确认切换并重启',
+      confirmRemoveTitle: '移除账号',
       confirmRemoveMsg: '确认从本机密钥库移除「{name}」？不影响当前正在使用的系统登录态。',
       confirmRemoveBtn: '确认删除',
+      confirmBlockedTitle: '检测到活跃任务',
       blockedWorkTitle: '检测到当前有 {count} 项任务/子进程正在运行，已暂停重启：',
       blockedWorkMore: '… 还有更多运行中项',
-      blockedWorkHint: '请等任务结束后点「重新检查并切换」；如确认无需等待，可点右侧强制切换。',
+      blockedWorkHint: '请等任务结束后点「重新检查并切换」。如确认无需等待，可点「仍要强制切换」。',
       blockedRetryBtn: '重新检查并切换',
       blockedForceBtn: '仍要强制切换',
       kindCascade: '对话运行中',
@@ -99,8 +107,7 @@
       guardSkipOnboardingLabel: '跳过重复条款弹窗',
       guardSkipOnboardingTip: '低风险：切号时同步更新本地引导记录，减少重复弹出的条款确认窗；关闭则不改动应用配置。',
       guardInfoLabel: '设置说明',
-      guardOn: '开启',
-      guardOff: '关闭',
+      confirmNewLoginTitle: '添加账号',
       newLoginConfirmMsg: '将自动备份当前账号并重启 Antigravity，以未登录状态进入官方原生 Google 登录；登录完成后再点击「保存当前账号」纳入列表。',
       newLoginConfirmBtn: '确认并重启',
       logsSummary: '最近切换日志',
@@ -111,9 +118,6 @@
       errActionFailed: '操作失败',
       errSwitchFailed: '切号失败',
       noticeNewLoginRestarting: '正在重启 Antigravity 以进入官方原生 Google 登录…',
-      noticeRefreshed: '已刷新账号状态与用量',
-      noticeRefreshedLocal: '已刷新本地账号状态',
-      noticeGuardSaved: '已更新高级设置',
       noticeGuardCooldown: '高级设置保护中，请 {sec} 秒后再试',
       noticeGuardCooldownFallback: '高级设置保护中，请稍后再试',
       errGuardSave: '无法更新高级设置',
@@ -167,13 +171,16 @@
       renamePlaceholder: 'New label (empty clears label)',
       saveBtn: 'Save',
       cancelBtn: 'Cancel',
+      confirmSwitchTitle: 'Switch Account',
       confirmSwitchMsg: 'Switch to "{name}"? Your current session will be backed up before Antigravity restarts.',
       confirmSwitchBtn: 'Switch & Restart',
+      confirmRemoveTitle: 'Remove Account',
       confirmRemoveMsg: 'Remove "{name}" from local encrypted vault? Active OS session stays untouched.',
       confirmRemoveBtn: 'Confirm Remove',
+      confirmBlockedTitle: 'Active Work Detected',
       blockedWorkTitle: 'Detected {count} active task(s) / subprocess(es); restart paused:',
       blockedWorkMore: '… and more active items',
-      blockedWorkHint: 'Wait for tasks to finish and click "Recheck & Switch", or force switch on the right.',
+      blockedWorkHint: 'Wait for tasks to finish and click "Recheck & Switch", or click "Force Switch" to proceed now.',
       blockedRetryBtn: 'Recheck & Switch',
       blockedForceBtn: 'Force Switch',
       kindCascade: 'Running Chat',
@@ -201,8 +208,7 @@
       guardSkipOnboardingLabel: 'Skip Repeated Onboarding Modal',
       guardSkipOnboardingTip: 'Low risk: Updates the local onboarding state on switch to reduce repeated terms prompts; leave off to avoid modifying app settings.',
       guardInfoLabel: 'Setting details',
-      guardOn: 'On',
-      guardOff: 'Off',
+      confirmNewLoginTitle: 'Add Account',
       newLoginConfirmMsg: 'Will back up your current account and restart Antigravity into official native Google sign-in. After signing in, click "Save Account" to add it to the list.',
       newLoginConfirmBtn: 'Confirm & Restart',
       logsSummary: 'Recent Switch Logs',
@@ -213,9 +219,6 @@
       errActionFailed: 'Operation failed',
       errSwitchFailed: 'Switch failed',
       noticeNewLoginRestarting: 'Restarting Antigravity for official native Google sign-in…',
-      noticeRefreshed: 'Accounts & usage refreshed',
-      noticeRefreshedLocal: 'Local account status refreshed',
-      noticeGuardSaved: 'Advanced settings updated',
       noticeGuardCooldown: 'Advanced Settings cooling down — please try again in {sec}s',
       noticeGuardCooldownFallback: 'Advanced Settings cooling down — please try again shortly',
       errGuardSave: 'Could not update advanced settings',
@@ -314,6 +317,11 @@
   }
 
   function syncScheme() {
+    const root = document.documentElement;
+    if (!getComputedStyle(root).getPropertyValue('--background').trim()) {
+      delete root.dataset.theme;
+      return;
+    }
     const probe = document.createElement('span');
     probe.className = 'scheme-probe';
     document.documentElement.appendChild(probe);
@@ -332,6 +340,8 @@
       state.noticeTimer = null;
     }
     const box = el('notice');
+    box.setAttribute('role', kind === 'err' ? 'alert' : 'status');
+    box.setAttribute('aria-live', kind === 'err' ? 'assertive' : 'polite');
     if (!text) {
       box.className = 'notice hidden';
       box.textContent = '';
@@ -485,7 +495,7 @@
     return svg;
   }
 
-  function createUsageBucketRow(bucket, groupTitle = '') {
+  function createUsageBucketRow(bucket) {
     const row = document.createElement('div');
     row.className = 'usage-bucket-row';
     if (bucket?.description) {
@@ -494,12 +504,6 @@
 
     const left = document.createElement('div');
     left.className = 'usage-bucket-left';
-    if (groupTitle) {
-      const titleEl = document.createElement('div');
-      titleEl.className = 'usage-group-title';
-      titleEl.textContent = groupTitle;
-      left.appendChild(titleEl);
-    }
 
     const labelEl = document.createElement('div');
     labelEl.className = 'usage-bucket-label';
@@ -548,19 +552,17 @@
     const hasSnapshot = entry.hasSnapshot && entry.source === 'snapshot';
     const usage = acc.isActive || hasSnapshot ? entry.data : null;
 
-    const card = document.createElement('div');
+    const card = document.createElement('section');
+    card.setAttribute('aria-label', t('usageHeading'));
     card.className = isLoading && usage ? 'usage-card usage-card-refreshing' : 'usage-card';
 
     const head = document.createElement('div');
     head.className = 'usage-card-head';
-    const titleEl = document.createElement('span');
-    titleEl.className = 'usage-card-title';
-    titleEl.textContent = t('usageHeading');
-    head.appendChild(titleEl);
     if (hasLive || hasSnapshot) {
       const badge = document.createElement('span');
       badge.className = 'usage-source-badge';
       if (hasLive) {
+        badge.classList.add('usage-source-live');
         badge.textContent = t('usageLive');
       } else {
         const timestamp = Date.parse(entry.capturedAt);
@@ -587,7 +589,7 @@
         )
       );
     }
-    card.appendChild(head);
+    if (head.hasChildNodes()) card.appendChild(head);
 
     if (hasSnapshot && entry.isStale) {
       const staleHint = document.createElement('div');
@@ -648,19 +650,18 @@
         grpEl.title = grp.description;
       }
       const buckets = Array.isArray(grp?.buckets) ? grp.buckets : [];
-      if (buckets.length === 1) {
-        grpEl.appendChild(createUsageBucketRow(buckets[0], grp.displayName || ''));
-      } else {
-        if (grp?.displayName) {
-          const grpTitle = document.createElement('div');
-          grpTitle.className = 'usage-group-title';
-          grpTitle.textContent = grp.displayName;
-          grpEl.appendChild(grpTitle);
-        }
-        for (const bucket of buckets) {
-          grpEl.appendChild(createUsageBucketRow(bucket));
-        }
+      if (grp?.displayName) {
+        const grpTitle = document.createElement('div');
+        grpTitle.className = 'usage-group-title';
+        grpTitle.textContent = grp.displayName;
+        grpEl.appendChild(grpTitle);
       }
+      const tiles = document.createElement('div');
+      tiles.className = 'usage-buckets';
+      for (const bucket of buckets) {
+        tiles.appendChild(createUsageBucketRow(bucket));
+      }
+      grpEl.appendChild(tiles);
       groupsEl.appendChild(grpEl);
     }
     card.appendChild(groupsEl);
@@ -760,8 +761,9 @@
     return t('kindDefault');
   }
 
-  function renderBlockedWorkBox(blockedWork, { onRetry, onCancel, onForce, switching }) {
+  function renderBlockedWorkBox(blockedWork, { onRetry, cancelBtn, onForce, switching }) {
     const title = document.createElement('div');
+    title.id = 'confirm-dialog-message';
     title.className = 'blocked-work-title';
     const count = Number.isFinite(blockedWork?.count) ? blockedWork.count : 1;
     title.textContent = t('blockedWorkTitle', { count });
@@ -786,14 +788,96 @@
 
     const row = document.createElement('div');
     row.className = 'confirm-actions confirm-actions-split';
-    const left = document.createElement('div');
-    left.className = 'confirm-actions-left';
-    left.appendChild(createButton(t('blockedRetryBtn'), 'btn btn-primary', onRetry, switching));
-    left.appendChild(createButton(t('cancelBtn'), 'btn btn-ghost', onCancel, switching));
-    const forceBtn = createButton(t('blockedForceBtn'), 'btn btn-danger-subtle', onForce, switching);
-    row.append(left, forceBtn);
+    const forceBtn = createButton(t('blockedForceBtn'), 'btn btn-danger-subtle btn-sm', onForce, switching);
+    forceBtn.classList.add('confirm-actions-left');
+    const right = document.createElement('div');
+    right.className = 'confirm-actions-right';
+    right.append(cancelBtn, createButton(t('blockedRetryBtn'), 'btn btn-primary btn-sm', onRetry, switching));
+    row.append(forceBtn, right);
 
     return [title, list, hint, row];
+  }
+
+  function isConfirmDialogOpen(dialog) {
+    return dialog.open || dialog.hasAttribute('open');
+  }
+
+  function cancelConfirmation() {
+    if (!state.confirm || state.busy) return;
+    const { type, id } = state.confirm;
+    state.confirm = null;
+    render();
+    // Account rows are rebuilt by render(), so focus the new trigger after dismissal.
+    el(type === 'new-login' ? 'add-account-btn' : `confirm-${type}-${id}`)?.focus?.({ preventScroll: true });
+  }
+
+  function renderConfirmDialog(data) {
+    const dialog = el('confirm-dialog');
+    const title = el('confirm-dialog-title');
+    const content = el('confirm-dialog-content');
+    const { type, id, blockedWork } = state.confirm || {};
+    const isNewLogin = type === 'new-login';
+    const accounts = Array.isArray(data?.accounts) ? data.accounts : [];
+    const account = accounts.find((acc) => acc.id === id);
+    const copy = CONFIRM_TEXT[type];
+    const isOpen = isConfirmDialogOpen(dialog);
+    if (!copy || (!isNewLogin && !account)) {
+      state.confirm = null;
+      if (isOpen) {
+        if (typeof dialog.close === 'function') dialog.close();
+        else dialog.removeAttribute('open');
+      }
+      title.textContent = '';
+      content.replaceChildren();
+      return;
+    }
+
+    const switching = Boolean(data?.switching || state.busy);
+    const cancelBtn = createButton(t('cancelBtn'), 'btn btn-pill btn-sm', cancelConfirmation, switching);
+    cancelBtn.autofocus = true;
+    const active = document.activeElement;
+    const focusedClass = active && content.contains?.(active) ? active.className : '';
+    const apiPath = isNewLogin ? '/api/accounts/new-login' : '/api/accounts/switch';
+    const runSwitch = (force) => executeSwitchAction(apiPath, { id, force }, { type, id });
+    if (blockedWork) {
+      title.textContent = t('confirmBlockedTitle');
+      content.replaceChildren(...renderBlockedWorkBox(blockedWork, {
+        onRetry: () => runSwitch(false),
+        cancelBtn,
+        onForce: () => runSwitch(true),
+        switching,
+      }));
+    } else {
+      const [titleKey, messageKey, submitKey] = copy;
+      const name = account?.label || pickDisplayEmail(account) || t('unnamedAccount');
+      title.textContent = t(titleKey);
+      const msg = document.createElement('p');
+      msg.id = 'confirm-dialog-message';
+      msg.className = 'confirm-dialog-msg';
+      msg.textContent = t(messageKey, { name });
+      const row = document.createElement('div');
+      row.className = 'confirm-actions';
+      const removing = type === 'remove';
+      const submit = removing
+        ? () => executeAction(() => apiPost('/api/accounts/remove', { id }))
+        : () => runSwitch(false);
+      const submitClass = removing ? 'btn btn-danger btn-sm' : 'btn btn-primary btn-sm';
+      row.append(cancelBtn, createButton(t(submitKey), submitClass, submit, switching));
+      content.replaceChildren(msg, row);
+    }
+
+    dialog.setAttribute('aria-describedby', 'confirm-dialog-message');
+    if (!isOpen) {
+      if (typeof dialog.showModal === 'function') dialog.showModal();
+      else {
+        dialog.setAttribute('open', '');
+        cancelBtn.focus?.({ preventScroll: true });
+      }
+    } else {
+      const next = focusedClass && Array.from(content.querySelectorAll('button')).find((button) => button.className === focusedClass);
+      const focusTarget = switching ? dialog : next || cancelBtn;
+      focusTarget.focus?.({ preventScroll: true });
+    }
   }
 
   function renderHeaderAndUnsavedBanner(data) {
@@ -834,62 +918,11 @@
       captureForm.className = 'inline-form hidden';
     }
 
-    const addAccountBtn = el('add-account-btn');
-    const confirmBox = el('new-login-confirm');
-    const confirmingNewLogin = state.confirm?.type === 'new-login';
-    addAccountBtn.disabled = switching;
-    addAccountBtn.setAttribute('aria-expanded', String(confirmingNewLogin));
-
-    if (confirmingNewLogin) {
-      confirmBox.className = 'confirm-box';
-      if (state.confirm.blockedWork) {
-        confirmBox.replaceChildren(
-          ...renderBlockedWorkBox(state.confirm.blockedWork, {
-            switching,
-            onRetry: () =>
-              executeSwitchAction('/api/accounts/new-login', { force: false }, { type: 'new-login' }),
-            onCancel: () => {
-              state.confirm = null;
-              render();
-            },
-            onForce: () =>
-              executeSwitchAction('/api/accounts/new-login', { force: true }, { type: 'new-login' }),
-          })
-        );
-      } else {
-        const msg = document.createElement('div');
-        msg.textContent = t('newLoginConfirmMsg');
-        const row = document.createElement('div');
-        row.className = 'confirm-actions';
-        row.appendChild(
-          createButton(
-            t('newLoginConfirmBtn'),
-            'btn btn-primary',
-            () => executeSwitchAction('/api/accounts/new-login', { force: false }, { type: 'new-login' }),
-            switching
-          )
-        );
-        row.appendChild(
-          createButton(
-            t('cancelBtn'),
-            'btn btn-ghost',
-            () => {
-              state.confirm = null;
-              render();
-            },
-            switching
-          )
-        );
-        confirmBox.replaceChildren(msg, row);
-      }
-    } else {
-      confirmBox.className = 'confirm-box hidden';
-      confirmBox.replaceChildren();
-    }
+    el('add-account-btn').disabled = switching;
   }
 
   function renderAccountItem(acc, switching) {
-    const item = document.createElement('div');
+    const item = document.createElement('li');
     item.className = acc.isActive ? 'account-item account-item-active' : 'account-item';
 
     const row = document.createElement('div');
@@ -968,18 +1001,18 @@
     const actions = document.createElement('div');
     actions.className = 'account-actions';
     if (!acc.isActive) {
-      actions.appendChild(
-        createButton(
-          t('switchBtn'),
-          'btn btn-primary btn-sm',
-          () => {
-            state.confirm = { type: 'switch', id: acc.id };
-            state.rename = null;
-            render();
-          },
-          switching
-        )
+      const switchBtn = createButton(
+        t('switchBtn'),
+        'btn btn-pill btn-sm',
+        () => {
+          state.confirm = { type: 'switch', id: acc.id };
+          render();
+        },
+        switching
       );
+      switchBtn.id = `confirm-switch-${acc.id}`;
+      switchBtn.setAttribute('aria-haspopup', 'dialog');
+      actions.appendChild(switchBtn);
     }
     actions.appendChild(
       createIconButton(
@@ -994,19 +1027,19 @@
         t('renameTitle')
       )
     );
-    actions.appendChild(
-      createIconButton(
-        'trash',
-        'btn btn-icon btn-icon-danger',
-        () => {
-          state.confirm = { type: 'remove', id: acc.id };
-          state.rename = null;
-          render();
-        },
-        switching,
-        t('deleteTitle')
-      )
+    const removeBtn = createIconButton(
+      'trash',
+      'btn btn-icon btn-icon-danger',
+      () => {
+        state.confirm = { type: 'remove', id: acc.id };
+        render();
+      },
+      switching,
+      t('deleteTitle')
     );
+    removeBtn.id = `confirm-remove-${acc.id}`;
+    removeBtn.setAttribute('aria-haspopup', 'dialog');
+    actions.appendChild(removeBtn);
 
     if (!(state.rename && state.rename.id === acc.id)) {
       row.appendChild(actions);
@@ -1027,7 +1060,7 @@
       });
       const saveBtn = document.createElement('button');
       saveBtn.type = 'submit';
-      saveBtn.className = 'btn btn-primary btn-sm';
+      saveBtn.className = 'btn btn-secondary btn-sm';
       saveBtn.textContent = t('saveBtn');
       saveBtn.disabled = switching;
       const cancelBtn = createButton(
@@ -1047,81 +1080,6 @@
       });
       form.append(input, saveBtn, cancelBtn);
       item.appendChild(form);
-    }
-
-    if (state.confirm && state.confirm.id === acc.id) {
-      const cbox = document.createElement('div');
-      cbox.className = 'confirm-box';
-
-      if (state.confirm.type === 'switch' && state.confirm.blockedWork) {
-        cbox.replaceChildren(
-          ...renderBlockedWorkBox(state.confirm.blockedWork, {
-            switching,
-            onRetry: () =>
-              executeSwitchAction(
-                '/api/accounts/switch',
-                { id: acc.id, force: false },
-                { type: 'switch', id: acc.id }
-              ),
-            onCancel: () => {
-              state.confirm = null;
-              render();
-            },
-            onForce: () =>
-              executeSwitchAction(
-                '/api/accounts/switch',
-                { id: acc.id, force: true },
-                { type: 'switch', id: acc.id }
-              ),
-          })
-        );
-      } else {
-        const msg = document.createElement('div');
-        const confirmRow = document.createElement('div');
-        confirmRow.className = 'confirm-actions';
-        const displayName = acc.label || pickDisplayEmail(acc);
-
-        if (state.confirm.type === 'switch') {
-          msg.textContent = t('confirmSwitchMsg', { name: displayName });
-          confirmRow.appendChild(
-            createButton(
-              t('confirmSwitchBtn'),
-              'btn btn-primary btn-sm',
-              () =>
-                executeSwitchAction(
-                  '/api/accounts/switch',
-                  { id: acc.id, force: false },
-                  { type: 'switch', id: acc.id }
-                ),
-              switching
-            )
-          );
-        } else if (state.confirm.type === 'remove') {
-          msg.textContent = t('confirmRemoveMsg', { name: displayName });
-          confirmRow.appendChild(
-            createButton(
-              t('confirmRemoveBtn'),
-              'btn btn-danger btn-sm',
-              () => executeAction(() => apiPost('/api/accounts/remove', { id: acc.id })),
-              switching
-            )
-          );
-        }
-
-        confirmRow.appendChild(
-          createButton(
-            t('cancelBtn'),
-            'btn btn-ghost btn-sm',
-            () => {
-              state.confirm = null;
-              render();
-            },
-            switching
-          )
-        );
-        cbox.append(msg, confirmRow);
-      }
-      item.appendChild(cbox);
     }
 
     const usageBar = document.createElement('div');
@@ -1179,7 +1137,7 @@
     const listEl = el('accounts-list');
 
     if (accounts.length === 0) {
-      const empty = document.createElement('div');
+      const empty = document.createElement('li');
       empty.className = 'empty-state';
       empty.textContent = canCaptureActiveAccount(active) ? t('emptyAccountsWithUnsaved') : t('emptyAccounts');
       listEl.replaceChildren(empty);
@@ -1202,18 +1160,11 @@
     settings.autoResumeEnabled = autoSwitchEnabled && Boolean(settings.autoResumeEnabled);
     el('guard-auto-resume-row').classList.toggle('guard-row-disabled', !autoSwitchEnabled);
     for (const [id, key, fallback = false] of GUARD_TOGGLES) {
-      const group = el(id);
-      const groupDisabled = disabled || (key === 'autoResumeEnabled' && !autoSwitchEnabled);
-      group.setAttribute('aria-disabled', String(groupDisabled));
+      const button = el(id);
+      const buttonDisabled = disabled || (key === 'autoResumeEnabled' && !autoSwitchEnabled);
       const enabled = Boolean(settings[key] ?? fallback);
-      for (const button of group.querySelectorAll('.guard-seg-btn')) {
-        const value = button.dataset.value === 'true';
-        const selected = value === enabled;
-        button.disabled = groupDisabled;
-        button.setAttribute('aria-checked', String(selected));
-        button.tabIndex = selected ? 0 : -1;
-        button.textContent = t(value ? 'guardOn' : 'guardOff');
-      }
+      button.disabled = buttonDisabled;
+      button.setAttribute('aria-checked', String(enabled));
     }
 
     const threshold = el('guard-threshold');
@@ -1242,6 +1193,7 @@
     renderAccountsSection(state.data);
     renderGuardSettings();
     renderLogs(state.data);
+    renderConfirmDialog(state.data);
   }
 
   async function refreshState(silent = false) {
@@ -1280,7 +1232,6 @@
       try {
         data = await apiPost('/api/settings/update', patch);
         if (!data?.settings) throw new Error(t('errGuardSave'));
-        showNotice(t('noticeGuardSaved'), 'ok', { autoHideMs: 2000 });
       } catch (err) {
         if (err?.status === 429 || err?.code === 'RATE_LIMITED') {
           const sec = err.retryAfterSec || 0;
@@ -1365,19 +1316,15 @@
     showNotice('');
     render();
     const startedAt = Date.now();
-    let hasOpenUsage = false;
-    let failed = false;
     try {
       const data = await apiPost('/api/state');
       state.data = data;
       render();
       const openAccounts = (data.accounts || []).filter((acc) => state.usageOpen[acc.id]);
-      hasOpenUsage = openAccounts.length > 0;
       await Promise.allSettled(
         openAccounts.map((acc) => loadAccountUsage(acc.id, { forceRefresh: acc.isActive }))
       );
     } catch (err) {
-      failed = true;
       showNotice(err.message || t('errReadState'), 'err');
     } finally {
       const elapsed = Date.now() - startedAt;
@@ -1386,19 +1333,11 @@
       }
       state.refreshing = false;
       render();
-      if (!failed && !el('notice').textContent) {
-        showNotice(hasOpenUsage ? t('noticeRefreshed') : t('noticeRefreshedLocal'), 'ok', {
-          autoHideMs: 2500,
-        });
-      }
     }
   }
 
-  async function executeAction(fn, options = {}) {
-    const { keepConfirmOff = false, autoHideMs = 2500 } =
-      typeof options === 'boolean' ? { keepConfirmOff: options } : options || {};
+  async function executeAction(fn) {
     state.busy = true;
-    if (keepConfirmOff) state.confirm = null;
     render();
     try {
       const res = await fn();
@@ -1408,9 +1347,8 @@
         } else if (res.switching) {
           state.data = { ...(state.data || {}), switching: true };
         }
-        if (res.message) {
-          const hideMs = res.switching ? 0 : autoHideMs;
-          showNotice(res.message, 'ok', hideMs > 0 ? { autoHideMs: hideMs } : undefined);
+        if (res.switching && res.message) {
+          showNotice(res.message, 'ok');
         }
       }
       state.confirm = null;
@@ -1434,7 +1372,7 @@
       state.confirm = null;
       if (confirmTarget.type === 'new-login' && res?.switching) {
         showNotice(t('noticeNewLoginRestarting'), 'ok');
-      } else if (res?.message) {
+      } else if (res?.switching && res.message) {
         showNotice(res.message, 'ok');
       }
     } catch (err) {
@@ -1443,8 +1381,8 @@
           ...confirmTarget,
           blockedWork: err.activeWork || { count: 1, items: [], truncated: false },
         };
-      }
-      if (confirmTarget.type !== 'new-login' || err.code !== 'ACTIVE_WORK_RUNNING') {
+      } else {
+        state.confirm = null;
         showNotice(err.message || t('errSwitchFailed'), 'err');
       }
     } finally {
@@ -1453,7 +1391,41 @@
     }
   }
 
+  function bindTipFallback(button) {
+    const tip = button.popoverTargetElement;
+    if (!tip?.showPopover) return;
+    const show = () => {
+      if (!tip.matches(':popover-open')) tip.showPopover({ source: button });
+    };
+    // Allow the pointer to cross the gap between the trigger and the top layer.
+    const scheduleHide = () => setTimeout(() => {
+      if (!button.matches(':hover, :focus-visible') && !tip.matches(':hover') && tip.matches(':popover-open')) {
+        tip.hidePopover();
+      }
+    }, 200);
+    button.addEventListener('pointerenter', (event) => {
+      if (event.pointerType !== 'touch') show();
+    });
+    button.addEventListener('focus', () => {
+      if (button.matches(':focus-visible')) show();
+    });
+    button.addEventListener('blur', scheduleHide);
+    button.addEventListener('pointerleave', scheduleHide);
+    tip.addEventListener('pointerleave', scheduleHide);
+  }
+
   function bindEvents() {
+    const dialog = el('confirm-dialog');
+    dialog.addEventListener('close', () => {
+      if (!isConfirmDialogOpen(dialog)) cancelConfirmation();
+    });
+    dialog.addEventListener('cancel', (event) => {
+      if (state.busy) event.preventDefault();
+    });
+    dialog.addEventListener('click', (event) => {
+      if (event.target === dialog && !state.busy) cancelConfirmation();
+    });
+
     el('toggle-lang-btn').addEventListener('click', () => {
       state.lang = state.lang === 'zh' ? 'en' : 'zh';
       try {
@@ -1485,30 +1457,18 @@
 
     el('add-account-btn').addEventListener('click', () => {
       state.confirm = { type: 'new-login' };
-      state.rename = null;
       render();
     });
 
     for (const button of el('guard-settings-form').querySelectorAll('.info-tip-btn')) {
       button.appendChild(createIcon('info'));
+      if (!('interestForElement' in HTMLButtonElement.prototype)) bindTipFallback(button);
     }
     for (const [id, key] of GUARD_TOGGLES) {
-      const group = el(id);
-      const buttons = Array.from(group.querySelectorAll('.guard-seg-btn'));
-      for (const button of buttons) {
-        button.addEventListener('click', async () => {
-          if (button.getAttribute('aria-checked') === 'true') return;
-          const hadFocus = group.contains(document.activeElement);
-          await saveGuardSetting(key, button.dataset.value === 'true');
-          if (hadFocus && (document.activeElement === document.body || group.contains(document.activeElement))) {
-            group.querySelector('[aria-checked="true"]').focus({ preventScroll: true });
-          }
-        });
-      }
-      group.addEventListener('keydown', (event) => {
-        if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return;
-        event.preventDefault();
-        buttons.find((button) => button !== event.target)?.click();
+      const button = el(id);
+      button.addEventListener('click', async () => {
+        const nextValue = button.getAttribute('aria-checked') !== 'true';
+        await saveGuardSetting(key, nextValue);
       });
     }
     const threshold = el('guard-threshold');
@@ -1518,6 +1478,7 @@
   }
 
   window.addEventListener('message', (event) => {
+    if (event.source && event.source !== window.parent && event.source !== window) return;
     if (event.data?.type === 'theme-change') {
       syncScheme();
     }
