@@ -6,6 +6,12 @@ All notable changes to **Antigravity Account Switcher** are documented in this f
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-11-28
+
+### Changed
+
+- **Aligned unsaved-account banner & text inputs with active-card styling**: updated `.unsaved-banner` from the legacy dashed amber box to the same solid blue highlight style used for the active account card (`10px` radius, soft primary tint and border), and refined text inputs with clean card-surface backgrounds, `8px` corners, and soft focus rings.
+
 ## [0.6.0] - 2026-11-28
 
 Adds Antigravity-style floating **View Usage** popovers and one-click **Smart Switch** powered purely by local quota snapshots.
@@ -105,6 +111,7 @@ Initial open-source release.
 
 - Fixed macOS `runInBackground` default test assertion and canonical positive DER certificate serial generation in CI (`a9e3bd3`).
 
+[0.6.1]: https://github.com/moon16u/antigravity-account-switcher/releases/tag/v0.6.1
 [0.6.0]: https://github.com/moon16u/antigravity-account-switcher/releases/tag/v0.6.0
 [0.5.0]: https://github.com/moon16u/antigravity-account-switcher/releases/tag/v0.5.0
 [0.4.1]: https://github.com/moon16u/antigravity-account-switcher/releases/tag/v0.4.1

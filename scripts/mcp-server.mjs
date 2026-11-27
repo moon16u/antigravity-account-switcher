@@ -29,7 +29,7 @@ import {
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const WORKER_SCRIPT = join(__dirname, '..', 'sidecars', 'switcher', 'switcher-worker.mjs');
 const MAX_RPC_BUFFER_BYTES = 2 * 1024 * 1024;
-const SERVER_VERSION = '0.6.0';
+const SERVER_VERSION = '0.6.1';
 const FIXED_RESUME_MESSAGE = '账号已切换完成，请继续刚才未完成的任务。';
 
 export const MCP_TOOLS = Object.freeze([

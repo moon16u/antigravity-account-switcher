@@ -260,18 +260,18 @@ button:disabled {
 
 /* Unsaved current account strip (hidden once active account is saved) */
 .unsaved-banner {
-  border: 1px dashed color-mix(in srgb, var(--sw-warning) 50%, var(--sw-border));
-  background: color-mix(in srgb, var(--sw-warning) 8%, var(--sw-bg));
-  border-radius: 8px;
-  padding: 9px 10px;
+  border: 1px solid color-mix(in srgb, var(--sw-primary) 34%, var(--sw-card));
+  background: color-mix(in srgb, var(--sw-primary) 11%, var(--sw-card));
+  border-radius: 10px;
+  padding: 11px 13px;
   display: flex;
   flex-direction: column;
-  gap: 7px;
+  gap: 8px;
 }
 
 .unsaved-banner-err {
-  border-color: color-mix(in srgb, var(--sw-error) 50%, var(--sw-border));
-  background: color-mix(in srgb, var(--sw-error) 8%, var(--sw-bg));
+  border-color: color-mix(in srgb, var(--sw-error) 40%, var(--sw-card));
+  background: color-mix(in srgb, var(--sw-error) 9%, var(--sw-card));
 }
 
 .unsaved-info {
@@ -295,17 +295,27 @@ button:disabled {
 
 input[type="text"] {
   width: 100%;
-  padding: 6px 9px;
-  border-radius: 6px;
+  padding: 6px 11px;
+  border-radius: 8px;
   border: 1px solid var(--sw-border);
-  background: var(--sw-field);
+  background: var(--sw-card);
   color: var(--sw-fg);
   font-size: 13px;
-  transition: border-color 120ms ease, background 120ms ease;
+  transition: border-color 120ms ease, box-shadow 120ms ease, background 120ms ease;
+}
+
+input[type="text"]::placeholder {
+  color: var(--sw-fg-faint);
 }
 
 input[type="text"]:hover {
-  border-color: color-mix(in srgb, var(--sw-fg) 20%, transparent);
+  border-color: color-mix(in srgb, var(--sw-fg) 22%, transparent);
+}
+
+input[type="text"]:focus-visible {
+  outline: none;
+  border-color: var(--sw-primary);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--sw-primary) 22%, transparent);
 }
 
 input:focus-visible,

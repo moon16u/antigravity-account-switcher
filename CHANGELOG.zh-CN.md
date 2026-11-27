@@ -6,6 +6,12 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本（Semantic Versioning）](https://semver.org/lang/zh-CN/)。
 
+## [0.6.1] - 2026-11-28
+
+### 优化
+
+- **统一「未保存当前账号」提示栏与输入框样式**：将旧版棕色虚线提示框升级为与当前使用账号卡片一致的淡蓝高亮实线卡片（`10px` 圆角、柔和主题蓝底与细边框），同步优化文本输入框为白底 `8px` 圆角与柔和聚焦态，贴合当前登录语境。
+
 ## [0.6.0] - 2026-11-28
 
 新增对齐 Antigravity 原生设计的悬浮「**查看用量**」卡片与基于本地快照的一键「**智能切换**」。
@@ -105,6 +111,7 @@
 
 - 修复 macOS 下 `runInBackground` 默认值测试断言，并修正 CI 中 DER 证书序列号的正数规范编码（`a9e3bd3`）。
 
+[0.6.1]: https://github.com/moon16u/antigravity-account-switcher/releases/tag/v0.6.1
 [0.6.0]: https://github.com/moon16u/antigravity-account-switcher/releases/tag/v0.6.0
 [0.5.0]: https://github.com/moon16u/antigravity-account-switcher/releases/tag/v0.5.0
 [0.4.1]: https://github.com/moon16u/antigravity-account-switcher/releases/tag/v0.4.1
