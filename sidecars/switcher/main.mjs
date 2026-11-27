@@ -220,7 +220,12 @@ export async function createApp(options = {}) {
       }
     }
     const accounts = listPublicAccounts(paths, effectiveActiveEmail, { revealEmails, activeTierName });
-    stateIdentity = { tokenEmail: active.email, activeId: accounts.find(a => a.isActive)?.id };
+    stateIdentity = {
+      tokenEmail: active.email,
+      activeId: accounts.find(a => a.isActive)?.id,
+      activeEmail: effectiveActiveEmail,
+      activeTierName,
+    };
     return {
       ok: true,
       active: sanitizeActiveState(active, lsUser, { revealEmail: revealEmails }),
@@ -360,6 +365,76 @@ export async function createApp(options = {}) {
         }
         const state = await buildStatePayload({ revealEmails: Boolean(data?.revealEmails) });
         return jsonResponse({ ...state, message: `已保存当前账号（${saved.maskedEmail}）` });
+      } catch (err) {
+        const mapped = mapError(err);
+        return jsonResponse({ error: mapped.error }, mapped.status);
+      }
+    },
+    'POST'
+  );
+
+  app.api(
+    '/api/accounts/best',
+    (data) => {
+      const blocked = requireSecurityGate(readLimit);
+      if (blocked) return blocked;
+      try {
+        const active = readActiveToken(paths, env);
+        // Reuse the panel's last LS identity while the local credential still matches.
+        const identity = stateIdentity?.tokenEmail === active.email ? stateIdentity : null;
+        const activeEmail = identity?.activeEmail || active.email;
+        const revealEmails = Boolean(data?.revealEmails);
+        const accounts = listPublicAccounts(paths, activeEmail, { revealEmails, activeTierName: identity?.activeTierName });
+        const backups = accounts.filter((acc) => !acc.isActive);
+        if (!backups.length) {
+          return jsonResponse({ ok: false, code: 'NO_BACKUP_ACCOUNT', message: '暂无可切换的备用账号。' });
+        }
+
+        const activeAccountId = accounts.find((acc) => acc.isActive)?.id || '';
+        const settings = loadGuardSettings(paths);
+        const usageById = quotaService.buildProjectedUsageMap(accounts, { activeAccountId });
+        const best = pickBestBackupAccount(accounts, usageById, {
+          activeAccountId, activeEmail, thresholdPercent: settings.thresholdPercent,
+        });
+        if (best) {
+          const matched = backups.find((acc) => acc.id === best.id);
+          return jsonResponse({
+            ok: true,
+            selectionSource: 'snapshot',
+            candidate: { ...best, ...(revealEmails && matched?.email ? { email: matched.email } : {}) },
+          });
+        }
+
+        // The local projection map only includes accounts that have a stored snapshot.
+        const [fallback] = backups.filter((acc) => !usageById.has(acc.id)).sort((a, b) => {
+          const aMs = Date.parse(a.lastUsedAt) || 0;
+          const bMs = Date.parse(b.lastUsedAt) || 0;
+          return aMs - bMs;
+        });
+        if (fallback) {
+          return jsonResponse({
+            ok: true,
+            selectionSource: 'unsnapshotted-fallback',
+            candidate: {
+              id: fallback.id,
+              label: fallback.label || '',
+              maskedEmail: fallback.maskedEmail || '',
+              ...(revealEmails && fallback.email ? { email: fallback.email } : {}),
+              tierName: fallback.tierName || '',
+              estimatedReset: false,
+              capturedAt: '',
+              source: 'none',
+              weeklyPercent: null,
+              fiveHourPercent: null,
+            },
+          });
+        }
+
+        return jsonResponse({
+          ok: false,
+          code: 'NO_HEALTHY_BACKUP_ACCOUNT',
+          message: '所有备用账号本地估算均处于低额度，建议手动查看用量后再切换。',
+        });
       } catch (err) {
         const mapped = mapError(err);
         return jsonResponse({ error: mapped.error }, mapped.status);

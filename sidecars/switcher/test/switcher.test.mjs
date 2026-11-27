@@ -24,7 +24,7 @@ import {
   parsePsOutput,
 } from '../active-work.mjs';
 import { createApp } from '../main.mjs';
-import { readQuotaAlertSnapshot, writeQuotaRefreshTrigger } from '../quota-guard.mjs';
+import { readQuotaAlertSnapshot, saveGuardSettings, writeQuotaRefreshTrigger } from '../quota-guard.mjs';
 import {
   createQuotaService,
   deleteQuotaSnapshot,
@@ -79,6 +79,7 @@ import {
   renameAccount,
   resolvePaths,
   sanitizeActiveState,
+  saveVault,
   syncActiveAccountTier,
   updateAccountSyncFields,
 } from '../vault.mjs';
@@ -1557,7 +1558,7 @@ test('syncActiveAccountTier persists tierName, pins active account first, and UI
   assert.equal(/\.style\./.test(js), false);
   assert.ok(js.includes('createUsageCardNode'));
   assert.ok(js.includes('查看用量'));
-  assert.ok(js.includes('View usage'));
+  assert.ok(js.includes('View Usage'));
   assert.ok(js.includes('USAGE_EXPAND_REFRESH_MS = 10_000'));
   assert.ok(js.includes('usageLastFetchAt'));
   assert.ok(js.includes('forceRefresh: !isInitialExpand'));
@@ -1729,6 +1730,95 @@ async function startQuotaSidecar(t, env, options = {}) {
   };
 }
 
+test('sidecar Smart Switch ranks local projections and falls back to the oldest unsnapshotted backup without LS RPC', async (t) => {
+  const { env, paths } = makeSandbox(t);
+  const active = savedAccount(paths, 'active@example.com');
+  writeFileSync(paths.tokenPath, makeSampleToken('active@example.com'));
+  const rpc = t.mock.fn(async () => null);
+  const post = await startQuotaSidecar(t, env, { callLsRpc: rpc, watchTriggers: false });
+  const best = (data) => post('/api/accounts/best', data);
+  assert.deepEqual(await best(), {
+    ok: false, code: 'NO_BACKUP_ACCOUNT', message: '暂无可切换的备用账号。',
+  });
+
+  const recent = savedAccount(paths, 'recent@example.com');
+  const oldest = importAccount(paths, {
+    credentialText: makeSampleToken('oldest@example.com'), label: 'Oldest', tierName: 'Google AI Pro',
+  });
+  const vault = loadVault(paths);
+  vault.accounts.find((acc) => acc.id === oldest.id).lastUsedAt = '';
+  vault.accounts.find((acc) => acc.id === recent.id).lastUsedAt = '2026-01-01T00:00:00Z';
+  saveVault(paths, vault);
+
+  const now = Date.now();
+  const capturedAt = new Date(now - 120_000).toISOString();
+  const past = new Date(now - 60_000).toISOString();
+  const future = new Date(now + 86_400_000).toISOString();
+  const snapshot = (account, weekly, fiveHour, weeklyReset = future) => {
+    const summary = quotaSummary(weekly, weeklyReset);
+    summary.groups[0].buckets.push({ bucketId: 'gemini-5h', window: '5h', remainingFraction: fiveHour, resetTime: future });
+    upsertQuotaSnapshot(paths, { accountId: account.id, capturedAt, summary });
+  };
+
+  snapshot(active, 1, 1);
+  snapshot(recent, 0.95, 0.4);
+  snapshot(oldest, 0.72, 0.64);
+  assert.deepEqual(await best(), {
+    ok: true, selectionSource: 'snapshot', candidate: {
+      id: oldest.id, label: 'Oldest', maskedEmail: maskEmail('oldest@example.com'), tierName: 'Google AI Pro',
+      estimatedReset: false, capturedAt, source: 'snapshot', weeklyPercent: 72, fiveHourPercent: 64,
+    },
+  });
+
+  snapshot(recent, 0.01, 0.92, past);
+  const projected = await best({ revealEmails: true });
+  assert.equal(projected.selectionSource, 'snapshot');
+  assert.equal(projected.candidate.id, recent.id);
+  assert.equal(projected.candidate.email, 'recent@example.com');
+  assert.equal(projected.candidate.estimatedReset, true);
+  assert.equal(projected.candidate.weeklyPercent, 100);
+  assert.equal(projected.candidate.fiveHourPercent, 92);
+
+  saveGuardSettings(paths, { thresholdPercent: 30 });
+  snapshot(recent, 0.3, 0.9);
+  snapshot(oldest, 0.9, 0.2);
+  assert.deepEqual(await best(), {
+    ok: false, code: 'NO_HEALTHY_BACKUP_ACCOUNT',
+    message: '所有备用账号本地估算均处于低额度，建议手动查看用量后再切换。',
+  });
+
+  deleteQuotaSnapshot(paths, oldest.id);
+  deleteQuotaSnapshot(paths, recent.id);
+  const fallback = {
+    id: oldest.id, label: 'Oldest', maskedEmail: maskEmail('oldest@example.com'), tierName: 'Google AI Pro',
+    estimatedReset: false, capturedAt: '', source: 'none', weeklyPercent: null, fiveHourPercent: null,
+  };
+  assert.deepEqual(await best(), { ok: true, selectionSource: 'unsnapshotted-fallback', candidate: fallback });
+  assert.deepEqual(await best({ revealEmails: true }), {
+    ok: true, selectionSource: 'unsnapshotted-fallback', candidate: { ...fallback, email: 'oldest@example.com' },
+  });
+  assert.equal(rpc.mock.callCount(), 0);
+});
+
+test('sidecar Smart Switch reuses panel identity until the local token changes', async (t) => {
+  const { env, paths } = makeSandbox(t);
+  const first = savedAccount(paths, 'first@example.com');
+  const second = savedAccount(paths, 'second@example.com');
+  savedAccount(paths, 'third@example.com');
+  writeFileSync(paths.tokenPath, makeSampleToken('first@example.com'));
+  upsertQuotaSnapshot(paths, { accountId: second.id, summary: quotaSummary(0.9) });
+  upsertQuotaSnapshot(paths, { accountId: first.id, summary: quotaSummary(0.8) });
+  const rpc = t.mock.fn(async () => ({ userStatus: { email: 'second@example.com' } }));
+  const post = await startQuotaSidecar(t, env, { callLsRpc: rpc, watchTriggers: false });
+
+  assert.equal((await post('/api/state')).accounts.find((acc) => acc.isActive).id, second.id);
+  assert.equal((await post('/api/accounts/best')).candidate.id, first.id);
+  writeFileSync(paths.tokenPath, makeSampleToken('third@example.com'));
+  assert.equal((await post('/api/accounts/best')).candidate.id, second.id);
+  assert.equal(rpc.mock.callCount(), 1);
+  assert.equal(rpc.mock.calls[0].arguments[1], 'GetUserStatus');
+});
+
 test('sidecar usage fetches only the active account and removal deletes only its target snapshot', async (t) => {
   const { env, paths } = makeSandbox(t);
   const active = savedAccount(paths, 'active@example.com');
@@ -1880,9 +1970,15 @@ test('public UI uses external assets and local quota and native account controls
   assert.ok(main);
   assert.match(main, /<ul id="accounts-list" class="accounts-list"><\/ul>/);
   assert.match(main, /<section id="tools-card"/);
-  assert.match(js, /const item = document\.createElement\('li'\);\s*item\.className = acc\.isActive/);
+  assert.match(js, /const item = (?:existingItem \|\| )?document\.createElement\('li'\);[\s\S]*?item\.className = acc\.isActive/);
   assert.match(js, /const empty = document\.createElement\('li'\);\s*empty\.className = 'empty-state'/);
   assert.match(js, /t\('switchBtn'\),\s*'btn btn-pill btn-sm'/);
+  assert.match(main, /<div class="card-head-actions">\s*<button\b[^>]*id="smart-switch-btn"[^>]*class="btn btn-pill hidden"[^>]*>智能切换<\/button>\s*<button\b[^>]*id="add-account-btn"/);
+  assert.match(css, /\.card-head-actions\s*\{[^}]*\bdisplay:\s*flex;[^}]*\bgap:\s*6px;[^}]*\bflex-wrap:\s*wrap;/);
+  assert.match(js, /apiPost\('\/api\/accounts\/best'\)/);
+  assert.match(js, /type: 'smart-switch',[\s\S]*?candidate: res\.candidate,[\s\S]*?selectionSource: res\.selectionSource/);
+  assert.match(js, /confirmSmartSwitchSnapshotMsg/);
+  assert.match(js, /confirmSmartSwitchFallbackMsg/);
   const addAccountButton = main.match(/<button\b[^>]*\sid="add-account-btn"[^>]*>/)?.[0];
   assert.ok(addAccountButton);
   assert.match(addAccountButton, /\sclass="btn btn-pill"/);
@@ -1978,7 +2074,7 @@ test('public UI uses external assets and local quota and native account controls
   assert.doesNotMatch(js, /\b(alert|confirm|prompt)\s*\(/);
 });
 
-test('settings hints share their native targets and usage tiles adapt to drawer width', () => {
+test('settings hints share their native targets and drawer controls adapt to its width', () => {
   const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
   const js = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
   const css = readFileSync(new URL('../public/styles.css', import.meta.url), 'utf8');
@@ -2001,12 +2097,6 @@ test('settings hints share their native targets and usage tiles adapt to drawer 
   assert.match(js, /!\('interestForElement' in HTMLButtonElement\.prototype\)/);
   assert.match(css, /position-area:\s*block-start/);
   assert.match(css, /position-try-fallbacks:\s*flip-block, inline-end, flip-inline/);
-  assert.match(js, /setAttribute\('aria-label', t\('usageHeading'\)\)/);
-  assert.doesNotMatch(js, /usage-card-title/);
-  assert.match(js, /className = 'usage-buckets'/);
-  assert.match(css, /\.usage-card\s*\{[^}]*container-type:\s*inline-size/);
-  assert.match(css, /@container \(min-width: 380px\)\s*\{\s*\.usage-buckets\s*\{[^}]*repeat\(2, minmax\(0, 1fr\)\)/);
-  assert.match(css, /\.usage-buckets:has\(> :only-child\)\s*\{\s*grid-template-columns: 1fr/);
   assert.match(css, /\.shell\s*\{[^}]*container-type:\s*inline-size/);
   assert.match(css, /@container \(max-width: 420px\)/);
   assert.doesNotMatch(css, /::-webkit-scrollbar|@media \(max-width: (420|440)px\)/);
@@ -2014,10 +2104,56 @@ test('settings hints share their native targets and usage tiles adapt to drawer 
   assert.match(css, /@supports \(appearance: base-select\)/);
   assert.match(css, /\.tool-item::details-content\s*\{[^}]*transition-behavior: allow-discrete/);
   assert.match(css, /@starting-style/);
-  assert.match(css, /@media \(prefers-reduced-motion: reduce\)\s*\{[^}]*\.usage-card[^}]*transition: none/);
   assert.match(js, /setAttribute\('role', kind === 'err' \? 'alert' : 'status'\)/);
   assert.match(js, /setAttribute\('aria-live', kind === 'err' \? 'assertive' : 'polite'\)/);
   assert.match(js, /event\.source && event\.source !== window\.parent && event\.source !== window\) return/);
+});
+
+test('account usage uses a native anchored popover with a single borderless bucket column', () => {
+  const js = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const css = readFileSync(new URL('../public/styles.css', import.meta.url), 'utf8');
+  assert.match(js, /className = 'usage-popover'/);
+  assert.match(js, /`usage-popover-\$\{id\}`/);
+  assert.match(js, /\.dataset\.accountId = id/);
+  assert.match(js, /setAttribute\('popover', 'hint'\)/);
+  for (const attr of ['interestfor', 'popovertarget', 'aria-controls']) {
+    assert.match(js, new RegExp(`setAttribute\\('${attr}', popover\\.id\\)`));
+  }
+  assert.match(js, /createIcon\('gauge'\)/);
+  assert.match(js, /setAttribute\('viewBox', '0 -960 960 960'\)/);
+  assert.match(js, /M473\.5-303\.5Q517-305 537-336l216-339-335 219/);
+  assert.match(js, /createIcon\('chevron-right'\)/);
+  assert.match(js, /\.append\(button, popover\)/);
+  assert.match(js, /document\.addEventListener\('toggle',[\s\S]*?\{ capture: true \}\)/);
+  assert.match(js, /className = 'usage-card-title'/);
+  assert.match(js, /className = 'usage-card-meta'/);
+  assert.match(js, /className = 'usage-buckets'/);
+  assert.match(js, /popover\.replaceChildren\(createUsageCardNode\(account, switching\)\)/);
+  const load = js.match(/async function loadAccountUsage\([\s\S]*?\n  \}/)?.[0];
+  assert.ok(load);
+  assert.equal((load.match(/updateUsagePopover\(id\)/g) || []).length, 2);
+  assert.doesNotMatch(load, /\brender\(\)/);
+  const refresh = js.match(/async function refreshAll\(\) \{[\s\S]*?\n  \}/)?.[0];
+  assert.match(refresh, /document\.querySelectorAll\('\.usage-popover:popover-open'\)/);
+  assert.doesNotMatch(js, /\busageOpen\b/);
+
+  assert.match(css, /\.usage-toggle-btn\s*\{[^}]*width:\s*100%;/);
+  assert.doesNotMatch(css, /\.usage-toggle-open\b/);
+  const popover = css.match(/\.usage-popover\[popover\]\s*\{([^}]*)\}/)?.[1];
+  assert.match(popover, /position:\s*fixed;/);
+  assert.match(popover, /position-area:\s*block-end span-inline-end;/);
+  assert.match(popover, /position-try-fallbacks:\s*flip-block, inline-end span-block-end, flip-inline;/);
+  assert.match(popover, /width:\s*min\(304px, calc\(100vw - 24px\)\);/);
+  assert.match(popover, /transition-behavior:\s*allow-discrete;/);
+  assert.match(css, /\.usage-groups\s*\{[^}]*display:\s*flex;[^}]*flex-direction:\s*column;[^}]*gap:\s*14px;/);
+  assert.match(css, /\.usage-buckets\s*\{[^}]*display:\s*flex;[^}]*flex-direction:\s*column;[^}]*gap:\s*8px;/);
+  const row = css.match(/\.usage-bucket-row\s*\{([^}]*)\}/)?.[1];
+  assert.match(row, /padding:\s*0;/);
+  assert.match(row, /border:\s*0;/);
+  assert.match(row, /background:\s*transparent;/);
+  assert.match(row, /justify-content:\s*space-between;/);
+  assert.match(css, /\.usage-ring-svg\s*\{[^}]*width:\s*20px;[^}]*height:\s*20px;/);
+  assert.match(css, /@media \(prefers-reduced-motion: reduce\)\s*\{[^}]*\.usage-popover\[popover\][^}]*transition:\s*none/);
 });
 
 test('worker changes onboarding only with opt-in and applies the pause only during a real switch', async (t) => {

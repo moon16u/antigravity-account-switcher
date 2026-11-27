@@ -6,6 +6,19 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本（Semantic Versioning）](https://semver.org/lang/zh-CN/)。
 
+## [0.6.0] - 2026-11-28
+
+新增对齐 Antigravity 原生设计的悬浮「**查看用量**」卡片与基于本地快照的一键「**智能切换**」。
+
+### 新增
+
+- **一键「智能切换」**（`POST /api/accounts/best`）：在「`+ 添加账号`」旁新增「**智能切换**」按钮，完全基于本地配额快照与重置倒计时推算挑选最优备用号（无快照时回退至最久未用备用号，零远端请求、零 LS RPC），并在原生 `<dialog>` 确认弹窗中展示推荐账号与预计余量（全隔离测试增至 `63` 项）。
+
+### 优化
+
+- **原生风格悬浮「查看用量」卡片**：将原先撑开列表的内联折叠区升级为 Antigravity 同款紧凑「查看用量」触发栏（采用官方 Material Symbols `speed` 仪表盘指针图标）+ 原生 Top-Layer 锚定悬浮卡（`popover="hint"` + `interestfor` + CSS Anchor Positioning），支持悬停/点击弹出、无框分组配额行与圆环进度、零页面位移，并在刷新数据时原地更新不闪退。
+- **统一纯净卡片底色**：移除普通账号卡片的多余嵌套底色（改为 `background: transparent`），与外层「已保存账号」容器同底、只以细线条区分，更贴合 Antigravity 原生设置页观感，同时保留当前使用号的淡蓝高亮状态。
+
 ## [0.5.0] - 2026-11-28
 
 围绕 **Antigravity 宿主设计语言对齐** 与 **`googlechrome/modern-web-guidance` 现代 Web 最佳实践** 完成侧栏前端重塑与交互打磨。
@@ -92,6 +105,7 @@
 
 - 修复 macOS 下 `runInBackground` 默认值测试断言，并修正 CI 中 DER 证书序列号的正数规范编码（`a9e3bd3`）。
 
+[0.6.0]: https://github.com/moon16u/antigravity-account-switcher/releases/tag/v0.6.0
 [0.5.0]: https://github.com/moon16u/antigravity-account-switcher/releases/tag/v0.5.0
 [0.4.1]: https://github.com/moon16u/antigravity-account-switcher/releases/tag/v0.4.1
 [0.4.0]: https://github.com/moon16u/antigravity-account-switcher/releases/tag/v0.4.0

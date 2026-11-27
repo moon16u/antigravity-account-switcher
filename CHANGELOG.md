@@ -6,6 +6,19 @@ All notable changes to **Antigravity Account Switcher** are documented in this f
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-11-28
+
+Adds Antigravity-style floating **View Usage** popovers and one-click **Smart Switch** powered purely by local quota snapshots.
+
+### Added
+
+- **One-click `Smart Switch`** (`POST /api/accounts/best`): added a **`Smart Switch`** button next to `+ Add Account` that ranks backup accounts locally from saved quota snapshots and reset-time projection (falling back to the least-recently-used unsnapshotted account, zero remote requests / zero LS RPCs) and previews the recommendation in the native `<dialog>` confirmation modal (`63` passing tests).
+
+### Changed
+
+- **Antigravity-style floating `View Usage` popover**: replaced the inline expanding usage drawer with a compact full-width `View Usage` trigger bar (using the official Material Symbols `speed` gauge icon) and a native Top-Layer anchored popover (`popover="hint"` + `interestfor` + CSS Anchor Positioning) with borderless metric rows, circular quota rings, zero layout shift, and in-place refresh without dismissing the open card.
+- **Cleaner flat card surfaces**: removed the nested fill tint on inactive account cards (`background: transparent`) so regular cards sit cleanly on the enclosing card surface like Antigravity's native Settings cards while keeping the active account highlight.
+
 ## [0.5.0] - 2026-11-28
 
 UI/UX visual polish aligned with Antigravity Desktop's native design language, paired with modern web platform upgrades following `googlechrome/modern-web-guidance`.
@@ -92,6 +105,7 @@ Initial open-source release.
 
 - Fixed macOS `runInBackground` default test assertion and canonical positive DER certificate serial generation in CI (`a9e3bd3`).
 
+[0.6.0]: https://github.com/moon16u/antigravity-account-switcher/releases/tag/v0.6.0
 [0.5.0]: https://github.com/moon16u/antigravity-account-switcher/releases/tag/v0.5.0
 [0.4.1]: https://github.com/moon16u/antigravity-account-switcher/releases/tag/v0.4.1
 [0.4.0]: https://github.com/moon16u/antigravity-account-switcher/releases/tag/v0.4.0

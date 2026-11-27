@@ -850,7 +850,7 @@ function mcpFixture(t, overrides = {}) {
   return { paths, env, active, add, jobs, rpc, call, snapshot };
 }
 
-test('MCP stdio initializes at 0.5.0 and supports newline and Content-Length framing', (t) => {
+test('MCP stdio initializes at 0.6.0 and supports newline and Content-Length framing', (t) => {
   const { paths, env } = makeSandbox(t);
   importAccount(paths, { credentialText: makeSampleToken('stdio@example.com') });
   const status = JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'get_switcher_status' } });
@@ -863,7 +863,7 @@ test('MCP stdio initializes at 0.5.0 and supports newline and Content-Length fra
   const { rest, messages } = parseJsonRpcBuffer(runStdio(MCP_SERVER_PATH, input, env, paths.dataDir));
   assert.equal(rest.length, 0);
   assert.deepEqual(messages.map(m => [m.msg.id, m.framing]), [[1, 'line'], [2, 'line'], [3, 'content-length']]);
-  assert.equal(messages[0].msg.result.serverInfo.version, '0.5.0');
+  assert.equal(messages[0].msg.result.serverInfo.version, '0.6.0');
   assert.equal(messages[1].msg.result.tools.length, 4);
   const switchTool = messages[1].msg.result.tools.find(tool => tool.name === 'switch_account');
   assert.match(switchTool.description, /Agent Autonomous Switch \(autoSwitchEnabled\) in Advanced Settings/);

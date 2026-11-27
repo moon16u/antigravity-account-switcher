@@ -1,7 +1,7 @@
 @font-face {
   font-family: "Google Sans";
   font-style: normal;
-  font-weight: 400 500;
+  font-weight: 400;
   font-display: swap;
   src: url("/fonts/GoogleSans-Latin.woff2") format("woff2");
   unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
@@ -211,6 +211,13 @@ button:disabled {
   display: flex;
   align-items: center;
   gap: 6px;
+}
+
+.card-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
 }
 
 .card-title {
@@ -526,11 +533,11 @@ summary:focus-visible {
 .account-item {
   border: 1px solid var(--sw-border);
   border-radius: 10px;
-  padding: 12px 13px;
-  background: var(--sw-bg);
+  padding: 11px 13px 6px;
+  background: transparent;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
   transition: border-color 120ms ease, background 120ms ease, box-shadow 120ms ease;
 }
 
@@ -655,61 +662,92 @@ summary:focus-visible {
   flex: none;
 }
 
-/* Account Usage Drawer */
+/* Account usage popover */
 .account-usage-bar {
-  display: flex;
-  flex-direction: column;
-  gap: 7px;
   border-top: 1px solid var(--sw-line);
-  padding-top: 6px;
-  margin-top: 1px;
+  padding-top: 4px;
+  margin-top: 0;
 }
 
 .usage-toggle-btn {
-  align-self: flex-start;
-  display: inline-flex;
+  display: flex;
   align-items: center;
-  gap: 4px;
-  padding: 2px 6px 2px 3px;
-  border-radius: 5px;
-  border: 1px solid transparent;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 3px 6px;
+  border: 0;
+  border-radius: 6px;
   background: transparent;
-  color: var(--sw-fg-muted);
-  font-size: 12px;
+  color: var(--sw-fg);
+  font-size: 12.5px;
   font-weight: 400;
-  transition: color 120ms ease, background 120ms ease;
+  line-height: 1.3;
+  text-align: start;
+  transition: background 120ms ease;
 }
 
-.usage-toggle-btn:hover:not(:disabled) {
-  color: var(--sw-fg);
+.usage-toggle-btn:hover,
+.usage-toggle-btn:focus-visible,
+.usage-toggle-btn:has(+ .usage-popover:popover-open) {
   background: var(--sw-hover);
 }
 
-.usage-toggle-btn svg {
-  width: 12px;
-  height: 12px;
+.usage-toggle-main {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.usage-toggle-main svg {
+  width: 16px;
+  height: 16px;
   flex: none;
-  transition: transform 140ms ease;
 }
 
-.usage-toggle-open {
+.usage-toggle-btn > svg {
+  width: 13px;
+  height: 13px;
+  color: var(--sw-fg-muted);
+  flex: none;
+}
+
+.usage-popover[popover] {
+  position: fixed;
+  inset: auto;
+  margin: 0;
+  position-area: block-end span-inline-end;
+  position-try-fallbacks: flip-block, inline-end span-block-end, flip-inline;
+  margin-block: 6px;
+  width: min(304px, calc(100vw - 24px));
+  max-height: calc(100dvh - 24px);
+  padding: 0;
+  border: 1px solid var(--sw-card-border);
+  border-radius: 12px;
+  background: var(--sw-card);
   color: var(--sw-fg);
+  box-shadow: 0 10px 30px light-dark(rgb(0 0 0 / 12%), rgb(0 0 0 / 42%));
+  font-family: var(--sw-font);
+  overflow: auto;
+  opacity: 0;
+  translate: 0 2px;
+  transition: opacity 120ms ease, translate 120ms ease, display 120ms, overlay 120ms;
+  transition-behavior: allow-discrete;
 }
 
-.usage-toggle-open svg {
-  transform: rotate(90deg);
+.usage-popover:popover-open {
+  opacity: 1;
+  translate: 0 0;
 }
 
 .usage-card {
-  container-type: inline-size;
-  border: 1px solid var(--sw-line);
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--sw-bg) 38%, var(--sw-card));
-  box-shadow: inset 0 1px 2px var(--sw-field);
-  padding: 10px 12px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
 }
 
 .usage-card-head {
@@ -719,8 +757,15 @@ summary:focus-visible {
   gap: 6px;
 }
 
-.usage-card-head .btn-icon {
-  margin-inline-start: auto;
+.usage-card-title {
+  color: var(--sw-fg-muted);
+  font-size: 12.5px;
+}
+
+.usage-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .usage-source-badge {
@@ -770,7 +815,7 @@ summary:focus-visible {
 .usage-groups {
   display: flex;
   flex-direction: column;
-  gap: 11px;
+  gap: 14px;
   transition: opacity 120ms ease;
 }
 
@@ -781,44 +826,32 @@ summary:focus-visible {
 .usage-group {
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: 8px;
 }
 
 .usage-buckets {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 6px;
-}
-
-@container (min-width: 380px) {
-  .usage-buckets {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 8px;
-  }
-
-  .usage-buckets:has(> :only-child) {
-    grid-template-columns: 1fr;
-  }
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
 .usage-group-title {
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 400;
   color: var(--sw-fg);
-  line-height: 1.3;
+  line-height: 1.35;
 }
 
 .usage-bucket-row {
   min-width: 0;
-  padding: 8px 10px;
-  border-radius: 8px;
-  background: var(--sw-bg);
-  border: 1px solid var(--sw-line);
+  padding: 0;
+  background: transparent;
+  border: 0;
   overflow-wrap: anywhere;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: 12px;
 }
 
 .usage-bucket-left {
@@ -830,13 +863,13 @@ summary:focus-visible {
 
 .usage-bucket-label {
   font-size: 13px;
-  color: var(--sw-fg);
+  color: var(--sw-fg-muted);
   font-weight: 400;
   line-height: 1.35;
 }
 
 .usage-bucket-reset {
-  font-size: 11.5px;
+  font-size: 12.5px;
   color: var(--sw-fg-muted);
   line-height: 1.3;
 }
@@ -854,7 +887,7 @@ summary:focus-visible {
 
 .usage-pct {
   font-size: 13px;
-  color: var(--sw-fg-2);
+  color: var(--sw-fg-muted);
   font-weight: 400;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
@@ -1377,8 +1410,7 @@ summary:focus-visible {
   }
 }
 
-.notice,
-.usage-card {
+.notice {
   transition: opacity 130ms ease, translate 130ms ease, display 130ms;
   transition-behavior: allow-discrete;
 }
@@ -1389,7 +1421,7 @@ summary:focus-visible {
     translate: 0 calc(-50% + 2px);
   }
 
-  .usage-card,
+  .usage-popover:popover-open,
   .info-tip-popover:popover-open {
     opacity: 0;
     translate: 0 2px;
@@ -1408,13 +1440,14 @@ summary:focus-visible {
   .notice,
   .confirm-dialog,
   .confirm-dialog::backdrop,
-  .usage-card,
+  .usage-popover[popover],
+  .usage-groups,
   .info-tip-popover[popover],
   .guard-switch,
   .guard-switch::before,
   .tool-item::details-content,
   .tool-summary::after,
-  .usage-toggle-btn svg {
+  .usage-toggle-btn {
     transition: none;
   }
 

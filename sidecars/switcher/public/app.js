@@ -16,6 +16,7 @@
   ];
   const CONFIRM_TEXT = {
     switch: ['confirmSwitchTitle', 'confirmSwitchMsg', 'confirmSwitchBtn'],
+    'smart-switch': ['confirmSmartSwitchTitle', 'confirmSmartSwitchSnapshotMsg', 'confirmSwitchBtn'],
     remove: ['confirmRemoveTitle', 'confirmRemoveMsg', 'confirmRemoveBtn'],
     'new-login': ['confirmNewLoginTitle', 'newLoginConfirmMsg', 'newLoginConfirmBtn'],
   };
@@ -31,6 +32,7 @@
       revealHideTitle: '隐藏完整邮箱',
       refreshTitle: '刷新状态',
       savedAccounts: '已保存账号',
+      smartSwitchBtn: '智能切换',
       addAccountBtn: '+ 添加账号',
       captureLabel: '当前账号备注名',
       captureLabelPlaceholder: '给当前账号起个备注名（可选，如 主号）',
@@ -73,6 +75,14 @@
       confirmSwitchTitle: '切换账号',
       confirmSwitchMsg: '确认切换到「{name}」？将先备份当前账号并重启 Antigravity 窗口。',
       confirmSwitchBtn: '确认切换并重启',
+      confirmSmartSwitchTitle: '智能切换',
+      confirmSmartSwitchSnapshotMsg: '推荐切换到「{name}」（{quota}），将先备份当前账号并重启 Antigravity 窗口。',
+      confirmSmartSwitchFallbackMsg: '推荐切换到最久未使用的「{name}」（暂无本地快照），将先备份当前账号并重启 Antigravity 窗口。',
+      smartSwitchNoBackup: '暂无可切换的备用账号',
+      smartSwitchNoHealthy: '所有备用账号本地估算均处于低额度，建议手动查看用量后再切换',
+      smartSwitchQuotaWeekly: 'Gemini 周 {pct}%',
+      smartSwitchQuota5h: '5小时 {pct}%',
+      smartSwitchQuotaEstReset: '预计已重置',
       confirmRemoveTitle: '移除账号',
       confirmRemoveMsg: '确认从本机密钥库移除「{name}」？不影响当前正在使用的系统登录态。',
       confirmRemoveBtn: '确认删除',
@@ -132,6 +142,7 @@
       revealHideTitle: 'Hide full email',
       refreshTitle: 'Refresh status',
       savedAccounts: 'Saved Accounts',
+      smartSwitchBtn: 'Smart Switch',
       addAccountBtn: '+ Add Account',
       captureLabel: 'Label for current account',
       captureLabelPlaceholder: 'Label for current account (optional)',
@@ -147,7 +158,7 @@
       switchBtn: 'Switch',
       renameTitle: 'Rename',
       deleteTitle: 'Delete',
-      viewUsage: 'View usage',
+      viewUsage: 'View Usage',
       usageHeading: 'Usage',
       usageLoading: 'Loading usage…',
       usageEmpty: 'No usage data',
@@ -174,6 +185,14 @@
       confirmSwitchTitle: 'Switch Account',
       confirmSwitchMsg: 'Switch to "{name}"? Your current session will be backed up before Antigravity restarts.',
       confirmSwitchBtn: 'Switch & Restart',
+      confirmSmartSwitchTitle: 'Smart Switch',
+      confirmSmartSwitchSnapshotMsg: 'Recommended: switch to "{name}" ({quota}). Your current session will be backed up before Antigravity restarts.',
+      confirmSmartSwitchFallbackMsg: 'Recommended: switch to least-recently-used "{name}" (no local snapshot yet). Your current session will be backed up before Antigravity restarts.',
+      smartSwitchNoBackup: 'No backup accounts available to switch to.',
+      smartSwitchNoHealthy: 'All backup accounts are locally estimated at low quota. Check usage manually before switching.',
+      smartSwitchQuotaWeekly: 'Gemini weekly {pct}%',
+      smartSwitchQuota5h: '5h {pct}%',
+      smartSwitchQuotaEstReset: 'Est. reset',
       confirmRemoveTitle: 'Remove Account',
       confirmRemoveMsg: 'Remove "{name}" from local encrypted vault? Active OS session stays untouched.',
       confirmRemoveBtn: 'Confirm Remove',
@@ -243,10 +262,10 @@
     busy: false,
     refreshing: false,
     loadingState: false,
+    selectingBackup: false,
     noticeTimer: null,
-    confirm: null, // { type: 'switch' | 'remove' | 'new-login', id?: string }
+    confirm: null,
     rename: null, // { id: string, value: string }
-    usageOpen: {}, // { [id]: boolean }
     usageById: {}, // { [id]: { status, data, source, capturedAt, isStale, estimatedAnyReset, hasSnapshot, error } }
     usageLastFetchAt: {}, // { [id]: number }
     guardPatch: {},
@@ -308,6 +327,15 @@
       addPath('M4.25 4.25l.6 8.5a1 1 0 0 0 1 .95h4.3a1 1 0 0 0 1-.95l.6-8.5');
     } else if (name === 'chevron-right') {
       addPath('M6 3.5l4.5 4.5-4.5 4.5');
+    } else if (name === 'gauge') {
+      // Material Symbols "speed" (400 outlined, Apache 2.0) — matches Antigravity View Usage icon
+      svg.setAttribute('viewBox', '0 -960 960 960');
+      svg.setAttribute('fill', 'currentColor');
+      svg.setAttribute('stroke', 'none');
+      svg.removeAttribute('stroke-width');
+      svg.removeAttribute('stroke-linecap');
+      svg.removeAttribute('stroke-linejoin');
+      addPath('M473.5-303.5Q517-305 537-336l216-339-335 219q-30 20-32 64t21 67q23 23 66.5 21.5ZM478-799q57 0 119 18.5T716-717l-52 37q-45-30-96.5-44.5T477.98-739q-140.47 0-239.23 100.22Q140-538.57 140-396.02 140-351 152.5-305q12.5 46 35.5 85h579q22-36 35-84t13-94q0-42-12.5-90.5T758-578l39-52q38 56 57 112.5T875-404q2 60-12 113t-41 98q-12 23-25.5 28t-33.5 5H192q-17 0-33.5-8.5T134-193q-26-48-40-97.5T80-396q0-83 31.5-156.5t85.5-128Q251-735 323.68-767T478-799Zm-9 331Z');
     } else if (name === 'info') {
       addCircle(8, 8, 6.25);
       addPath('M8 7.5v3.25M8 5.25h.01');
@@ -558,6 +586,11 @@
 
     const head = document.createElement('div');
     head.className = 'usage-card-head';
+    const title = document.createElement('span');
+    title.className = 'usage-card-title';
+    title.textContent = t('usageHeading');
+    const meta = document.createElement('div');
+    meta.className = 'usage-card-meta';
     if (hasLive || hasSnapshot) {
       const badge = document.createElement('span');
       badge.className = 'usage-source-badge';
@@ -576,10 +609,10 @@
           badge.textContent += ` · ${time}`;
         }
       }
-      head.appendChild(badge);
+      meta.appendChild(badge);
     }
     if (acc.isActive) {
-      head.appendChild(
+      meta.appendChild(
         createIconButton(
           'refresh',
           isLoading ? 'btn btn-icon btn-icon-sm is-spinning' : 'btn btn-icon btn-icon-sm',
@@ -589,7 +622,8 @@
         )
       );
     }
-    if (head.hasChildNodes()) card.appendChild(head);
+    head.append(title, meta);
+    card.appendChild(head);
 
     if (hasSnapshot && entry.isStale) {
       const staleHint = document.createElement('div');
@@ -721,6 +755,7 @@
     }
 
     el('saved-heading').textContent = t('savedAccounts');
+    el('smart-switch-btn').textContent = t('smartSwitchBtn');
     el('add-account-btn').textContent = t('addAccountBtn');
     const captureLabel = el('capture-label');
     captureLabel.placeholder = t('captureLabelPlaceholder');
@@ -807,21 +842,37 @@
     const { type, id } = state.confirm;
     state.confirm = null;
     render();
-    // Account rows are rebuilt by render(), so focus the new trigger after dismissal.
-    el(type === 'new-login' ? 'add-account-btn' : `confirm-${type}-${id}`)?.focus?.({ preventScroll: true });
+    const triggerId = type === 'new-login' ? 'add-account-btn'
+      : type === 'smart-switch' ? 'smart-switch-btn'
+        : `confirm-${type}-${id}`;
+    el(triggerId)?.focus?.({ preventScroll: true });
+  }
+
+  function formatSmartSwitchQuota(candidate) {
+    const quotas = [];
+    if (Number.isFinite(candidate.weeklyPercent)) {
+      quotas.push(t('smartSwitchQuotaWeekly', { pct: candidate.weeklyPercent }));
+    }
+    if (Number.isFinite(candidate.fiveHourPercent)) {
+      quotas.push(t('smartSwitchQuota5h', { pct: candidate.fiveHourPercent }));
+    }
+    if (candidate.estimatedReset) quotas.push(t('smartSwitchQuotaEstReset'));
+    return quotas.join(' · ');
   }
 
   function renderConfirmDialog(data) {
     const dialog = el('confirm-dialog');
     const title = el('confirm-dialog-title');
     const content = el('confirm-dialog-content');
-    const { type, id, blockedWork } = state.confirm || {};
+    const confirmation = state.confirm || {};
+    const { type, id, blockedWork, candidate, selectionSource } = confirmation;
     const isNewLogin = type === 'new-login';
+    const isSmartSwitch = type === 'smart-switch';
     const accounts = Array.isArray(data?.accounts) ? data.accounts : [];
     const account = accounts.find((acc) => acc.id === id);
     const copy = CONFIRM_TEXT[type];
     const isOpen = isConfirmDialogOpen(dialog);
-    if (!copy || (!isNewLogin && !account)) {
+    if (!copy || (!isNewLogin && !account) || (isSmartSwitch && (!candidate || account.isActive))) {
       state.confirm = null;
       if (isOpen) {
         if (typeof dialog.close === 'function') dialog.close();
@@ -838,7 +889,7 @@
     const active = document.activeElement;
     const focusedClass = active && content.contains?.(active) ? active.className : '';
     const apiPath = isNewLogin ? '/api/accounts/new-login' : '/api/accounts/switch';
-    const runSwitch = (force) => executeSwitchAction(apiPath, { id, force }, { type, id });
+    const runSwitch = (force) => executeSwitchAction(apiPath, { id, force }, confirmation);
     if (blockedWork) {
       title.textContent = t('confirmBlockedTitle');
       content.replaceChildren(...renderBlockedWorkBox(blockedWork, {
@@ -849,12 +900,15 @@
       }));
     } else {
       const [titleKey, messageKey, submitKey] = copy;
-      const name = account?.label || pickDisplayEmail(account) || t('unnamedAccount');
+      const target = isSmartSwitch ? candidate : account;
+      const name = target?.label || pickDisplayEmail(target) || t('unnamedAccount');
       title.textContent = t(titleKey);
       const msg = document.createElement('p');
       msg.id = 'confirm-dialog-message';
       msg.className = 'confirm-dialog-msg';
-      msg.textContent = t(messageKey, { name });
+      msg.textContent = isSmartSwitch && selectionSource === 'unsnapshotted-fallback'
+        ? t('confirmSmartSwitchFallbackMsg', { name })
+        : t(messageKey, { name, quota: isSmartSwitch ? formatSmartSwitchQuota(candidate) : '' });
       const row = document.createElement('div');
       row.className = 'confirm-actions';
       const removing = type === 'remove';
@@ -918,12 +972,56 @@
       captureForm.className = 'inline-form hidden';
     }
 
+    const smartSwitch = el('smart-switch-btn');
+    smartSwitch.classList.toggle('hidden', !accounts.some((acc) => !acc.isActive));
+    smartSwitch.disabled = switching || state.selectingBackup;
     el('add-account-btn').disabled = switching;
   }
 
-  function renderAccountItem(acc, switching) {
-    const item = document.createElement('li');
+  function updateAccountTier(item, tierName) {
+    const tier = item.querySelector('.account-tier');
+    const meta = tier.parentElement;
+    const hasEmail = Boolean(meta.querySelector('.account-email'));
+    tier.textContent = tierName || '';
+    tier.classList.toggle('hidden', !tierName);
+    meta.querySelector('.account-tier-sep').classList.toggle('hidden', !hasEmail || !tierName);
+    meta.querySelector('.account-last-sep')?.classList.toggle('hidden', !hasEmail && !tierName);
+  }
+
+  function createUsageBar(id) {
+    const bar = document.createElement('div');
+    bar.className = 'account-usage-bar';
+
+    const popover = document.createElement('div');
+    popover.className = 'usage-popover';
+    popover.id = `usage-popover-${id}`;
+    popover.dataset.accountId = id;
+    popover.tabIndex = -1;
+    popover.setAttribute('popover', 'hint');
+
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'usage-toggle-btn';
+    button.setAttribute('interestfor', popover.id);
+    button.setAttribute('popovertarget', popover.id);
+    button.setAttribute('aria-controls', popover.id);
+
+    const buttonMain = document.createElement('span');
+    buttonMain.className = 'usage-toggle-main';
+    const buttonLabel = document.createElement('span');
+    buttonLabel.className = 'usage-toggle-label';
+    buttonMain.append(createIcon('gauge'), buttonLabel);
+    button.append(buttonMain, createIcon('chevron-right'));
+    bar.append(button, popover);
+    return bar;
+  }
+
+  function renderAccountItem(acc, switching, existingItem) {
+    const item = existingItem || document.createElement('li');
+    item.id = `account-item-${acc.id}`;
+    item.dataset.accountId = acc.id;
     item.className = acc.isActive ? 'account-item account-item-active' : 'account-item';
+    const content = document.createDocumentFragment();
 
     const row = document.createElement('div');
     row.className = 'account-row';
@@ -967,31 +1065,22 @@
       metaEl.appendChild(emailSpan);
     }
 
-    if (acc.tierName) {
-      if (metaEl.hasChildNodes()) {
-        const sep = document.createElement('span');
-        sep.className = 'meta-sep';
-        sep.textContent = '·';
-        metaEl.appendChild(sep);
-      }
-      const tierSpan = document.createElement('span');
-      tierSpan.className = 'account-tier';
-      tierSpan.textContent = acc.tierName;
-      metaEl.appendChild(tierSpan);
-    }
+    const tierSep = document.createElement('span');
+    tierSep.className = 'meta-sep account-tier-sep';
+    tierSep.textContent = '·';
+    const tierSpan = document.createElement('span');
+    tierSpan.className = 'account-tier';
+    metaEl.append(tierSep, tierSpan);
 
     const lastText = formatTime(acc.lastUsedAt);
     if (lastText) {
-      if (metaEl.hasChildNodes()) {
-        const sep = document.createElement('span');
-        sep.className = 'meta-sep';
-        sep.textContent = '·';
-        metaEl.appendChild(sep);
-      }
+      const sep = document.createElement('span');
+      sep.className = 'meta-sep account-last-sep';
+      sep.textContent = '·';
       const lastSpan = document.createElement('span');
       lastSpan.className = 'account-last';
       lastSpan.textContent = `${t('lastUsedPrefix')}: ${lastText}`;
-      metaEl.appendChild(lastSpan);
+      metaEl.append(sep, lastSpan);
     }
 
     textCol.append(titleGroup, metaEl);
@@ -1044,7 +1133,7 @@
     if (!(state.rename && state.rename.id === acc.id)) {
       row.appendChild(actions);
     }
-    item.appendChild(row);
+    content.appendChild(row);
 
     if (state.rename && state.rename.id === acc.id) {
       const form = document.createElement('form');
@@ -1079,40 +1168,21 @@
         executeAction(() => apiPost('/api/accounts/rename', { id: acc.id, label: nextLabel }));
       });
       form.append(input, saveBtn, cancelBtn);
-      item.appendChild(form);
+      content.appendChild(form);
     }
 
-    const usageBar = document.createElement('div');
-    usageBar.className = 'account-usage-bar';
-    const isUsageOpen = Boolean(state.usageOpen[acc.id]);
-    const usageToggleBtn = document.createElement('button');
-    usageToggleBtn.type = 'button';
-    usageToggleBtn.className = isUsageOpen ? 'usage-toggle-btn usage-toggle-open' : 'usage-toggle-btn';
-    usageToggleBtn.setAttribute('aria-expanded', String(isUsageOpen));
-    usageToggleBtn.append(createIcon('chevron-right'), document.createTextNode(t('viewUsage')));
-    usageToggleBtn.addEventListener('click', () => {
-      const nextOpen = !state.usageOpen[acc.id];
-      state.usageOpen[acc.id] = nextOpen;
-      if (nextOpen) {
-        const cur = state.usageById[acc.id];
-        const isInitialExpand = !cur || cur.status === 'idle';
-        const lastAt = state.usageLastFetchAt[acc.id] || 0;
-        const elapsed = lastAt > 0 ? Date.now() - lastAt : Infinity;
-        if (
-          cur?.status !== 'loading' &&
-          (!acc.isActive || isInitialExpand || cur.status === 'error' || elapsed > USAGE_EXPAND_REFRESH_MS)
-        ) {
-          void loadAccountUsage(acc.id, { forceRefresh: !isInitialExpand });
-          return;
-        }
+    const usageBar = existingItem?.querySelector('.account-usage-bar') || createUsageBar(acc.id);
+    usageBar.querySelector('.usage-toggle-label').textContent = t('viewUsage');
+    if (existingItem) {
+      // Keep the popover and its anchor connected across account refreshes.
+      for (const child of Array.from(item.children)) {
+        if (child !== usageBar) child.remove();
       }
-      render();
-    });
-    usageBar.appendChild(usageToggleBtn);
-    if (isUsageOpen) {
-      usageBar.appendChild(createUsageCardNode(acc, switching));
+      item.insertBefore(content, usageBar);
+    } else {
+      item.append(content, usageBar);
     }
-    item.appendChild(usageBar);
+    updateAccountTier(item, acc.tierName);
 
     return item;
   }
@@ -1123,9 +1193,6 @@
     const switching = Boolean(data?.switching || state.busy);
     if (data && Array.isArray(data.accounts)) {
       const validIds = new Set(accounts.map((a) => a.id));
-      for (const k of Object.keys(state.usageOpen)) {
-        if (!validIds.has(k)) delete state.usageOpen[k];
-      }
       for (const k of Object.keys(state.usageById)) {
         if (!validIds.has(k)) delete state.usageById[k];
       }
@@ -1144,8 +1211,26 @@
       return;
     }
 
-    const nodes = accounts.map((acc) => renderAccountItem(acc, switching));
-    listEl.replaceChildren(...nodes);
+    const existingItems = new Map();
+    const accountIds = new Set(accounts.map((acc) => acc.id));
+    for (const child of Array.from(listEl.children)) {
+      const id = child.dataset.accountId;
+      if (accountIds.has(id)) existingItems.set(id, child);
+      else child.remove();
+    }
+    accounts.forEach((acc, index) => {
+      const existingItem = existingItems.get(acc.id);
+      const item = renderAccountItem(acc, switching, existingItem);
+      const next = listEl.children[index] || null;
+      if (item !== next) {
+        if (existingItem && listEl.moveBefore) listEl.moveBefore(item, next);
+        else listEl.insertBefore(item, next);
+      }
+      if (!existingItem && !('interestForElement' in HTMLButtonElement.prototype)) {
+        bindTipFallback(item.querySelector('.usage-toggle-btn'), { interactive: true });
+      }
+      if (item.querySelector('.usage-popover:popover-open')) updateUsagePopover(acc.id);
+    });
   }
 
   function guardSettingsDisabled() {
@@ -1257,6 +1342,36 @@
     await guardSaveQueue;
   }
 
+  function updateUsagePopover(id) {
+    const popover = el(`usage-popover-${id}`);
+    const account = state.data?.accounts?.find((acc) => acc.id === id);
+    if (!popover || !account) return;
+    const restoreFocus = popover.contains(document.activeElement);
+    const switching = Boolean(state.data?.switching || state.busy);
+    popover.replaceChildren(createUsageCardNode(account, switching));
+    if (restoreFocus) {
+      const control = popover.querySelector('button:not(:disabled)') || popover;
+      control.focus({ preventScroll: true });
+    }
+  }
+
+  function handleUsagePopoverToggle(event) {
+    const popover = event.target;
+    if (event.newState !== 'open' || !popover?.classList?.contains('usage-popover')) return;
+    const accId = popover.dataset.accountId;
+    const account = state.data?.accounts?.find((acc) => acc.id === accId);
+    if (!account) return;
+    const current = state.usageById[accId];
+    const isInitialExpand = !current || current.status === 'idle';
+    const elapsed = Date.now() - (state.usageLastFetchAt[accId] || 0);
+    if (current?.status !== 'loading' &&
+        (!account.isActive || isInitialExpand || current.status === 'error' || elapsed > USAGE_EXPAND_REFRESH_MS)) {
+      void loadAccountUsage(accId, { forceRefresh: !isInitialExpand });
+    } else {
+      updateUsagePopover(accId);
+    }
+  }
+
   async function loadAccountUsage(id, { forceRefresh = false } = {}) {
     const account = state.data?.accounts?.find((acc) => acc.id === id);
     if (!account) return;
@@ -1274,12 +1389,14 @@
       status: 'loading',
       error: '',
     };
-    render();
+    updateUsagePopover(id);
     try {
       const res = await apiPost('/api/accounts/usage', {
         id,
         forceRefresh: Boolean(account.isActive && forceRefresh),
       });
+      const currentAccount = state.data?.accounts?.find((acc) => acc.id === id);
+      if (!currentAccount) return;
       state.usageById[id] = {
         status: 'loaded',
         data: res?.usage ?? null,
@@ -1291,22 +1408,26 @@
         error: '',
       };
       state.usageLastFetchAt[id] = Date.now();
-      if (res?.tierName && Array.isArray(state.data?.accounts)) {
+      if (res?.tierName && currentAccount.tierName !== res.tierName) {
         state.data = {
           ...state.data,
           accounts: state.data.accounts.map((a) =>
             a.id === id && a.tierName !== res.tierName ? { ...a, tierName: res.tierName } : a
           ),
         };
+        const item = el(`account-item-${id}`);
+        if (item) updateAccountTier(item, res.tierName);
       }
     } catch (err) {
-      state.usageById[id] = {
-        ...prev,
-        status: 'error',
-        error: err?.message || t('errUsageFailed'),
-      };
+      if (state.usageById[id]) {
+        state.usageById[id] = {
+          ...prev,
+          status: 'error',
+          error: err?.message || t('errUsageFailed'),
+        };
+      }
     } finally {
-      render();
+      updateUsagePopover(id);
     }
   }
 
@@ -1314,15 +1435,17 @@
     if (state.refreshing) return;
     state.refreshing = true;
     showNotice('');
-    render();
+    applyStaticI18n();
+    renderGuardSettings();
     const startedAt = Date.now();
     try {
       const data = await apiPost('/api/state');
       state.data = data;
       render();
-      const openAccounts = (data.accounts || []).filter((acc) => state.usageOpen[acc.id]);
       await Promise.allSettled(
-        openAccounts.map((acc) => loadAccountUsage(acc.id, { forceRefresh: acc.isActive }))
+        Array.from(document.querySelectorAll('.usage-popover:popover-open'), (popover) =>
+          loadAccountUsage(popover.dataset.accountId, { forceRefresh: true })
+        )
       );
     } catch (err) {
       showNotice(err.message || t('errReadState'), 'err');
@@ -1332,7 +1455,8 @@
         await new Promise((r) => setTimeout(r, 320 - elapsed));
       }
       state.refreshing = false;
-      render();
+      applyStaticI18n();
+      renderGuardSettings();
     }
   }
 
@@ -1391,30 +1515,92 @@
     }
   }
 
-  function bindTipFallback(button) {
+  async function selectSmartSwitch() {
+    if (state.selectingBackup || state.busy || state.data?.switching) return;
+    state.selectingBackup = true;
+    renderHeaderAndUnsavedBanner(state.data);
+    showNotice('');
+    try {
+      const res = await apiPost('/api/accounts/best');
+      if (res.ok && res.candidate) {
+        if (!state.confirm && !state.busy && !state.data?.switching) {
+          state.confirm = {
+            type: 'smart-switch',
+            id: res.candidate.id,
+            candidate: res.candidate,
+            selectionSource: res.selectionSource,
+          };
+          render();
+        }
+      } else {
+        const message = res.code === 'NO_HEALTHY_BACKUP_ACCOUNT'
+          ? t('smartSwitchNoHealthy')
+          : res.message || t('smartSwitchNoBackup');
+        showNotice(message, 'warn', { autoHideMs: 4000 });
+      }
+    } catch (err) {
+      showNotice(err.message || t('errSwitchFailed'), 'err');
+    } finally {
+      state.selectingBackup = false;
+      renderHeaderAndUnsavedBanner(state.data);
+    }
+  }
+
+  function bindTipFallback(button, { interactive = false } = {}) {
     const tip = button.popoverTargetElement;
     if (!tip?.showPopover) return;
-    const show = () => {
-      if (!tip.matches(':popover-open')) tip.showPopover({ source: button });
+    let showTimer;
+    let shownByInterest = false;
+    const showIfClosed = () => {
+      if (!tip.isConnected || tip.matches(':popover-open')) return;
+      tip.showPopover({ source: button });
+      shownByInterest = true;
     };
-    // Allow the pointer to cross the gap between the trigger and the top layer.
-    const scheduleHide = () => setTimeout(() => {
-      if (!button.matches(':hover, :focus-visible') && !tip.matches(':hover') && tip.matches(':popover-open')) {
-        tip.hidePopover();
+    const scheduleShow = () => {
+      if (interactive) {
+        clearTimeout(showTimer);
+        showTimer = setTimeout(showIfClosed, 180);
+      } else {
+        showIfClosed();
       }
-    }, 200);
+    };
+
+    // Allow the pointer to cross the gap between the trigger and the top layer.
+    const scheduleHide = () => {
+      clearTimeout(showTimer);
+      setTimeout(() => {
+        if ((!interactive || shownByInterest) && !button.matches(':hover, :focus-visible') &&
+            !tip.matches(':hover, :focus-within') && tip.matches(':popover-open')) {
+          tip.hidePopover();
+        }
+      }, 200);
+    };
     button.addEventListener('pointerenter', (event) => {
-      if (event.pointerType !== 'touch') show();
+      if (event.pointerType !== 'touch') scheduleShow();
     });
     button.addEventListener('focus', () => {
-      if (button.matches(':focus-visible')) show();
+      if (button.matches(':focus-visible')) scheduleShow();
     });
     button.addEventListener('blur', scheduleHide);
     button.addEventListener('pointerleave', scheduleHide);
     tip.addEventListener('pointerleave', scheduleHide);
+    tip.addEventListener('focusout', scheduleHide);
+    if (interactive) {
+      button.addEventListener('click', (event) => {
+        clearTimeout(showTimer);
+        if (shownByInterest && tip.matches(':popover-open')) {
+          event.preventDefault();
+          shownByInterest = false;
+        }
+      });
+      tip.addEventListener('toggle', (event) => {
+        if (event.newState === 'closed') shownByInterest = false;
+      });
+    }
   }
 
   function bindEvents() {
+    document.addEventListener('toggle', handleUsagePopoverToggle, { capture: true });
     const dialog = el('confirm-dialog');
     dialog.addEventListener('close', () => {
       if (!isConfirmDialogOpen(dialog)) cancelConfirmation();
@@ -1459,6 +1645,7 @@
       state.confirm = { type: 'new-login' };
       render();
     });
+    el('smart-switch-btn').addEventListener('click', () => void selectSmartSwitch());
 
     for (const button of el('guard-settings-form').querySelectorAll('.info-tip-btn')) {
       button.appendChild(createIcon('info'));
