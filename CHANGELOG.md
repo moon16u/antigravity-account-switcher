@@ -6,6 +6,20 @@ All notable changes to **Antigravity Account Switcher** are documented in this f
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-11-28
+
+UI/UX visual polish aligned with Antigravity Desktop's native design language, paired with modern web platform upgrades following `googlechrome/modern-web-guidance`.
+
+### UI & UX
+
+- **Aligned with Antigravity Desktop design language**: replaced segmented controls with native-style sliding toggle switches, adopted outlined pill buttons for `+ Add Account` and `Switch`, matched the host's active-card tint and `#2f75c3` primary accent, removed heavy bold weights across the panel, and bundled the official offline **Google Sans** Latin subset (`OFL-1.1`, 36 KB) at a `14px` base size.
+- **Compact usage tiles & zero-shift overlays**: redesigned the `View usage` drawer into responsive 2-column metric tiles on wider panes, upgraded switch/remove/add-account/active-work confirmations to a lightweight native `<dialog>` modal (`0px` layout shift), and narrowed top status pills to appear only for rate-limit cooldowns, switch/restart transitions, and errors.
+
+### Modern Web Platform (`modern-web-guidance`)
+
+- Replaced manual `ⓘ` tooltip positioning hacks with native Popover API (`popover="hint"`), `interestfor`, and CSS Anchor Positioning (`position-area` / `position-try-fallbacks`) for hoverable, `Esc`-dismissible, overflow-safe hints.
+- Adopted CSS Container Queries (`container-type: inline-size`), `<meta name="color-scheme" content="light dark">` + `light-dark()` tokens, zero-JS native transitions (`interpolate-size: allow-keywords`, `::details-content`, `@starting-style`), branded `appearance: base-select` threshold picker with custom thin chevron and checkmark, `prefers-contrast: more` scrollbar cleanup, and semantic `<main>` / `<ul>` / `role="alert"` / `event.source` hardening (`60` passing tests).
+
 ## [0.4.1] - 2026-11-27
 
 ### Security
@@ -78,6 +92,7 @@ Initial open-source release.
 
 - Fixed macOS `runInBackground` default test assertion and canonical positive DER certificate serial generation in CI (`a9e3bd3`).
 
+[0.5.0]: https://github.com/moon16u/antigravity-account-switcher/releases/tag/v0.5.0
 [0.4.1]: https://github.com/moon16u/antigravity-account-switcher/releases/tag/v0.4.1
 [0.4.0]: https://github.com/moon16u/antigravity-account-switcher/releases/tag/v0.4.0
 [0.3.0]: https://github.com/moon16u/antigravity-account-switcher/releases/tag/v0.3.0

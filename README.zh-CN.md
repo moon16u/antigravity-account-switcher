@@ -49,11 +49,11 @@
   - **切号前活跃任务护栏**：自动检测运行中的对话、后台任务、活跃终端与用户子进程，有任务运行时暂停并给出「重新检查并切换」「取消」与记入审计日志（`FORCE_SWITCH_REQUESTED`）的「仍要强制切换」。
 - **事件驱动低额度提醒、MCP 工具与「Agent 自主切号」硬权限门禁**：
   - **随对话周期触发**：`PostInvocation` Hook（`hooks.json` → `scripts/quota-hook.mjs`）写入节流触发文件，Sidecar 通过 `fs.watch` 监听并异步更新本地 `quota-alert.json`，空闲挂机严格零请求。`PreInvocation` Hook 毫秒级读取本地快照，按会话动态浮动阈值（`dynamicThresholdEnabled`，默认开启）分级去重注入提醒（**`soft`** 软性收尾提醒 → **`hard`** 硬下限提醒）。
-  - **内置零依赖 stdio MCP 服务（`0.4.1`）与 `/switch-account` 技能**：提供 `get_switcher_status`、`list_accounts`、`get_quota`（活跃账号实时本地 RPC，非活跃账号本地快照推算）与 `switch_account`（`pickBest: true` 基于本地快照挑选最优备用号，无快照时回退至最久未用备用号）。
+  - **内置零依赖 stdio MCP 服务（`0.5.0`）与 `/switch-account` 技能**：提供 `get_switcher_status`、`list_accounts`、`get_quota`（活跃账号实时本地 RPC，非活跃账号本地快照推算）与 `switch_account`（`pickBest: true` 基于本地快照挑选最优备用号，无快照时回退至最久未用备用号）。
   - **「Agent 自主切号」硬权限开关（默认关闭）**：
     - **关闭时**：Agent 仅具备**只读权限**（查询状态、额度与提醒）；MCP 服务层对 `switch_account` 执行 fail-closed 硬拒绝并返回 `AGENT_SWITCH_DISABLED`，同时「**切号后自动续跑**」自动关闭并在界面中置灰禁用。
     - **开启时**：授权 Agent 在低额度硬下限或用户指令下自主切号（仍受活跃任务护栏约束），「**切号后自动续跑**」也可独立开关，在桌面端应用重启就绪后自动唤醒当前会话继续任务。
-  - **清爽的「高级设置」面板**：精简纯标题、仅悬停 `ⓘ` 时显示的「**低风险：** / **中风险：**」说明气泡、右对齐即时「**关闭 / 开启**」左右分段切换控件（独立 `25 次/分` 限流保护与秒级冷却提示）、可选「**跳过重复条款弹窗**」（`skipOnboardingPrompt`，默认关闭），以及位于面板底部的「**触发阈值**」（`10%–50%`）。
+  - **宿主风格原生界面与「高级设置」面板**：对齐 Antigravity 桌面端设计语言（白底细边框药丸按钮、平滑滑动开关、离线内置 **Google Sans** 字体、宽栏 2 列紧凑用量卡、零位移原生 `<dialog>` 确认窗与原生 Popover `ⓘ` 风险气泡），配备独立 `25 次/分` 设置冷却保护、可选「**跳过重复条款弹窗**」（`skipOnboardingPrompt`，默认关闭）及底部「**触发阈值**」（`10%–50%`）。
 
 ## 使用边界与已知说明
 
@@ -152,8 +152,8 @@
 
 ## 仓库结构
 
-- `plugin.json` — 插件清单（`antigravity-account-switcher`，`0.4.1`）
-- `mcp_config.json` / `scripts/mcp-server.mjs` — 内置零依赖 stdio MCP 服务（`0.4.1`）
+- `plugin.json` — 插件清单（`antigravity-account-switcher`，`0.5.0`）
+- `mcp_config.json` / `scripts/mcp-server.mjs` — 内置零依赖 stdio MCP 服务（`0.5.0`）
 - `hooks.json` / `scripts/quota-hook.mjs` — 轻量事件驱动 `PreInvocation` / `PostInvocation` Hook
 - `skills/switch-account/SKILL.md` — 面向 Agent 的 `/switch-account` 技能工作流
 - `sidecars/switcher/main.mjs` — Sidecar HTTP 服务、`fs.watch` 触发刷新、安全门禁与限流
@@ -164,8 +164,8 @@
 - `sidecars/switcher/platform.mjs` — 运行时检测、路径转换、桌面端重启与可选引导同步
 - `sidecars/switcher/active-work.mjs` — 切号前回环 RPC 与用户子进程检测护栏
 - `sidecars/switcher/switcher-worker.mjs` — 脱离进程树的独立切号、原生登录与桌面端重启执行器
-- `sidecars/switcher/public/` — 侧栏 Web UI（`index.html`、`app.js`、`styles.css`）
-- `sidecars/switcher/test/` — 全隔离单元与集成测试套件（共 `59` 项，覆盖 `switcher.test.mjs` 与 `mcp-and-hook.test.mjs`）
+- `sidecars/switcher/public/` — 侧栏 Web UI（`index.html`、`app.js`、`styles.css` 及离线 `fonts/GoogleSans-Latin.woff2`，`OFL-1.1`）
+- `sidecars/switcher/test/` — 全隔离单元与集成测试套件（共 `60` 项，覆盖 `switcher.test.mjs` 与 `mcp-and-hook.test.mjs`）
 - `CHANGELOG.md` / `CHANGELOG.zh-CN.md` — 中英文双语更新日志
 
 ## 运行测试

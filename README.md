@@ -49,11 +49,11 @@ A cross-platform auxiliary-pane plugin (`SIDECAR_UI_ENTRYPOINT_AUX_PANE`) for **
   - **Active-Work Guard**: checks running conversations, background tasks, terminals, and user child processes before closing the desktop app, pausing with **Recheck & Switch**, **Cancel**, or audited **Force Switch** (`FORCE_SWITCH_REQUESTED`).
 - **Event-Driven Quota Alerts, MCP Tools & Hard Agent Permission Gate**:
   - **Conversation-driven monitoring**: `PostInvocation` (`hooks.json` → `scripts/quota-hook.mjs`) writes a throttled local trigger file watched by the Sidecar via `fs.watch`, updating `quota-alert.json` only during active conversations (zero idle requests). `PreInvocation` reads the local snapshot in milliseconds and injects per-conversation, per-level alerts (**`soft`** wrap-up reminder → **`hard`** switch alert) using per-session jittered thresholds (`dynamicThresholdEnabled`, default on).
-  - **Bundled stdio MCP server (`0.4.1`) & `/switch-account` skill**: exposes `get_switcher_status`, `list_accounts`, `get_quota` (live local RPC for active account, local snapshot projection for inactive accounts), and `switch_account` (`pickBest: true` ranks from local snapshots with least-recently-used unsnapshotted fallback).
+  - **Bundled stdio MCP server (`0.5.0`) & `/switch-account` skill**: exposes `get_switcher_status`, `list_accounts`, `get_quota` (live local RPC for active account, local snapshot projection for inactive accounts), and `switch_account` (`pickBest: true` ranks from local snapshots with least-recently-used unsnapshotted fallback).
   - **Hard Permission Gate (`Agent Autonomous Switch`, default OFF)**:
     - When **OFF**, the Agent is strictly **read-only** (status, quota, low-quota reminders). Calling `switch_account` fails closed at the MCP server with `AGENT_SWITCH_DISABLED`, and **Auto-Resume After Switch** is automatically turned off and greyed out in the UI.
     - When **ON**, the Agent is authorized to switch on request or at the low-quota hard floor (still protected by the active-work guard), and **Auto-Resume After Switch** can be toggled independently to resume your conversation after restart once the new backend is ready.
-  - **Clean Advanced Settings Panel**: concise setting titles, hover-only `ⓘ` tooltips with clear **`Low risk:`** / **`Medium risk:`** labels, right-aligned instant **`Off / On`** segmented controls (with dedicated `25 req/min` rate-limit cooldown feedback), opt-in **Skip Repeated Onboarding Modal** (`skipOnboardingPrompt`, default OFF), and **Alert Threshold** (`10%–50%`) anchored at the bottom.
+  - **Native-Style UI & Clean Advanced Settings**: aligned with Antigravity Desktop's design language (outlined pill buttons, smooth sliding toggle switches, bundled offline **Google Sans** font, responsive 2-column usage tiles, native `<dialog>` confirmations with zero layout shift, and native popover `ⓘ` tooltips with **`Low risk:`** / **`Medium risk:`** labels), dedicated `25 req/min` settings rate-limit cooldown, opt-in **Skip Repeated Onboarding Modal** (`skipOnboardingPrompt`, default OFF), and **Alert Threshold** (`10%–50%`) at the bottom.
 
 ## Scope & Known Limitations
 
@@ -152,8 +152,8 @@ Runtime data is isolated from plugin source files under `~/.gemini/antigravity/s
 
 ## Repository Structure
 
-- `plugin.json` — Plugin manifest (`antigravity-account-switcher`, `0.4.1`)
-- `mcp_config.json` / `scripts/mcp-server.mjs` — Bundled zero-dependency stdio MCP server (`0.4.1`)
+- `plugin.json` — Plugin manifest (`antigravity-account-switcher`, `0.5.0`)
+- `mcp_config.json` / `scripts/mcp-server.mjs` — Bundled zero-dependency stdio MCP server (`0.5.0`)
 - `hooks.json` / `scripts/quota-hook.mjs` — Lightweight `PreInvocation` & `PostInvocation` hooks
 - `skills/switch-account/SKILL.md` — `/switch-account` agent workflow skill
 - `sidecars/switcher/main.mjs` — Sidecar HTTP server, `fs.watch` event-driven quota refresh, security gates & rate limits
@@ -164,8 +164,8 @@ Runtime data is isolated from plugin source files under `~/.gemini/antigravity/s
 - `sidecars/switcher/platform.mjs` — Runtime detection, path translation, desktop relaunch & opt-in onboarding sync
 - `sidecars/switcher/active-work.mjs` — Pre-switch loopback RPC & user child-process guard
 - `sidecars/switcher/switcher-worker.mjs` — Detached switch, native sign-in & desktop restart worker
-- `sidecars/switcher/public/` — Auxiliary-pane UI (`index.html`, `app.js`, `styles.css`)
-- `sidecars/switcher/test/` — Isolated unit & integration test suites (`59` tests across `switcher.test.mjs` and `mcp-and-hook.test.mjs`)
+- `sidecars/switcher/public/` — Auxiliary-pane UI (`index.html`, `app.js`, `styles.css`, and offline `fonts/GoogleSans-Latin.woff2` under `OFL-1.1`)
+- `sidecars/switcher/test/` — Isolated unit & integration test suites (`60` tests across `switcher.test.mjs` and `mcp-and-hook.test.mjs`)
 - `CHANGELOG.md` / `CHANGELOG.zh-CN.md` — Bilingual release changelog
 
 ## Running Tests

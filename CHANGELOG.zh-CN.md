@@ -6,6 +6,20 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本（Semantic Versioning）](https://semver.org/lang/zh-CN/)。
 
+## [0.5.0] - 2026-11-28
+
+围绕 **Antigravity 宿主设计语言对齐** 与 **`googlechrome/modern-web-guidance` 现代 Web 最佳实践** 完成侧栏前端重塑与交互打磨。
+
+### UI / UX 优化
+
+- **全面对齐宿主视觉语言**：高级设置升级为 Antigravity 同款平滑滑动开关（`role="switch"`），「`+ 添加账号`」与「`切换`」统一为白底细边框药丸按钮，当前使用卡片与主题蓝（`#2f75c3`）对齐宿主设置页配色；取消全局粗体字重，统一 `14px` 基准字号，并离线内置官方 **Google Sans** 拉丁子集字体（`OFL-1.1`，36 KB）。
+- **紧凑用量布局与零位移交互**：展开「查看用量」在宽栏下自动排为 2 列紧凑指标卡，显著压缩纵向高度；切号、删除、添加账号与活跃任务拦截统一收进原生居中毛玻璃 `<dialog>` 弹窗（0px 页面位移）；顶部悬浮提示收窄居中，且改为仅在高级设置冷却保护、切号重启间隙与报错时显示。
+
+### Modern Web 规范升级（`modern-web-guidance`）
+
+- 将 `ⓘ` 说明气泡重构为原生 Popover API（`popover="hint"`）+ `interestfor` + CSS Anchor Positioning，移除脆弱的像素硬算，支持自动贴边防遮挡、移入阅读与 `Esc` 关闭。
+- 落地容器查询（`container-type: inline-size`）、`<meta name="color-scheme" content="light dark">` + `light-dark()` 防暗色闪白、原生零 JS 折叠/淡入动效（`interpolate-size`、`::details-content`、`@starting-style`）、`appearance: base-select` 定制阈值下拉框（细线条下拉箭头与极简选中勾）、清理失效滚动条样式并补 `prefers-contrast: more`，以及 `<main>` / `<ul>` / `role="alert"` / `event.source` 等语义与细节加固（隔离测试增至 `60` 项）。
+
 ## [0.4.1] - 2026-11-27
 
 ### 安全加固
@@ -78,6 +92,7 @@
 
 - 修复 macOS 下 `runInBackground` 默认值测试断言，并修正 CI 中 DER 证书序列号的正数规范编码（`a9e3bd3`）。
 
+[0.5.0]: https://github.com/moon16u/antigravity-account-switcher/releases/tag/v0.5.0
 [0.4.1]: https://github.com/moon16u/antigravity-account-switcher/releases/tag/v0.4.1
 [0.4.0]: https://github.com/moon16u/antigravity-account-switcher/releases/tag/v0.4.0
 [0.3.0]: https://github.com/moon16u/antigravity-account-switcher/releases/tag/v0.3.0
