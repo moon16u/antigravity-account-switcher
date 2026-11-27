@@ -770,7 +770,7 @@ summary:focus-visible {
 .usage-groups {
   display: flex;
   flex-direction: column;
-  gap: 9px;
+  gap: 11px;
   transition: opacity 120ms ease;
 }
 
@@ -782,11 +782,6 @@ summary:focus-visible {
   display: flex;
   flex-direction: column;
   gap: 5px;
-}
-
-.usage-group + .usage-group {
-  border-block-start: 1px solid var(--sw-line);
-  padding-block-start: 8px;
 }
 
 .usage-buckets {
