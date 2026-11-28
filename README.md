@@ -14,9 +14,9 @@ A cross-platform auxiliary-pane plugin (`SIDECAR_UI_ENTRYPOINT_AUX_PANE`) for **
 >
 > **Heads-up**: I use this plugin myself every day and have not experienced any account issues or bans so far — if that ever changes, I will update this notice promptly. That said, switching multiple accounts on the same device still carries inherent platform policy risk, so please switch sensibly and be mindful with primary accounts. This is an independent MIT-licensed community tool; please assess the risk for your own setup (see [Risk Notice & Disclaimer](#risk-notice--disclaimer)).
 
-| Floating View Usage & OS Keyring | One-Click Smart Switch | Advanced Settings & Hard Gate |
+| Floating View Usage & OS Keyring | Switch by Quota | Advanced Settings & Hard Gate |
 | :---: | :---: | :---: |
-| <img src="assets/screenshots/overview-usage-en.png" alt="Account list with floating View Usage popover and OS Keyring footer" width="280" /> | <img src="assets/screenshots/smart-switch-en.png" alt="One-click Smart Switch confirmation modal with local quota projection" width="280" /> | <img src="assets/screenshots/advanced-settings-en.png" alt="Advanced Settings with native sliding switches and risk popover" width="280" /> |
+| <img src="assets/screenshots/overview-usage-en.png" alt="Account list with floating View Usage popover and OS Keyring footer" width="280" /> | <img src="assets/screenshots/smart-switch-en.png" alt="Switch by Quota confirmation modal with local quota projection" width="280" /> | <img src="assets/screenshots/advanced-settings-en.png" alt="Advanced Settings with native sliding switches and risk popover" width="280" /> |
 
 ## Supported Platforms
 
@@ -36,11 +36,11 @@ A cross-platform auxiliary-pane plugin (`SIDECAR_UI_ENTRYPOINT_AUX_PANE`) for **
   - Clicking **`+ Add Account`** syncs and backs up your current session, signs out cleanly, and restarts Antigravity into Google's official sign-in screen.
   - Once signed in, click **`Save Account`** in the panel to encrypt and add the account to your local vault.
   - On **native Windows**, panel loading spawns zero child processes; clicking **Save Account** or backing up before a switch reads `gemini:antigravity` from Windows Credential Manager on demand (preferring Python `ctypes` `CredReadW`, with non-hidden `pwsh` / `powershell.exe` fallback).
-- **Local Quota Snapshots, Floating `View Usage` & One-Click `Smart Switch`**:
+- **Local Quota Snapshots, Floating `View Usage` & `Switch by Quota`**:
   - **Active account**: queries the local `language_server` (`RetrieveUserQuotaSummary`) on demand with a `30s` cache, and automatically saves a final snapshot right before switching away.
   - **Inactive accounts**: render from local snapshots (`quota-snapshots.json`) with **zero RPC or network requests**. Buckets past their `resetTime` display **`Est. reset`** / **`Est. 100%`**, and snapshots older than 24 hours show a gentle staleness hint until you switch back.
   - **Floating `View Usage` popover**: hover or click any account's **`View Usage`** bar to inspect its usage in an Antigravity-style Top-Layer floating card with zero layout shift and in-place live refresh.
-  - **One-click `Smart Switch`**: ranks backup accounts locally from saved quota snapshots and reset-time projection (falling back to the least-recently-used unsnapshotted backup, zero remote requests) and previews the recommended switch in a confirmation modal.
+  - **`Switch by Quota`**: ranks backup accounts locally from saved quota snapshots and reset-time projection (falling back to the least-recently-used unsnapshotted backup, zero remote requests) and previews the recommended switch in a confirmation modal.
   - Emails are masked by default with a one-click header toggle to reveal full addresses, alongside instant **`中 / EN`** language switching.
 - **OS Keyring + AES-256-GCM Encrypted Vault (No Backup Bloat)**:
   - Encrypts saved accounts (`vault.enc.json`), the latest pre-switch safety backup (`last-token.enc.json`), and single-use switch jobs (`jobs/job-<uuid>.enc.json`) with a 256-bit AES-GCM master key stored in your **OS Keyring** (**Windows Credential Manager**, **macOS Keychain**, or **Linux / WSL2 Secret Service** when D-Bus is available), with verified automatic migration from legacy `vault.key` files and safe `0600` file fallback on headless / default WSL2 environments.
@@ -51,7 +51,7 @@ A cross-platform auxiliary-pane plugin (`SIDECAR_UI_ENTRYPOINT_AUX_PANE`) for **
   - **Active-Work Guard**: checks running conversations, background tasks, terminals, and user child processes before closing the desktop app, pausing with **Recheck & Switch**, **Cancel**, or audited **Force Switch** (`FORCE_SWITCH_REQUESTED`).
 - **Event-Driven Quota Alerts, MCP Tools & Hard Agent Permission Gate**:
   - **Conversation-driven monitoring**: `PostInvocation` (`hooks.json` → `scripts/quota-hook.mjs`) writes a throttled local trigger file watched by the Sidecar via `fs.watch`, updating `quota-alert.json` only during active conversations (zero idle requests). `PreInvocation` reads the local snapshot in milliseconds and injects per-conversation, per-level alerts (**`soft`** wrap-up reminder → **`hard`** switch alert) using per-session jittered thresholds (`dynamicThresholdEnabled`, default on).
-  - **Bundled stdio MCP server (`0.7.0`) & `/switch-account` skill**: exposes `get_switcher_status`, `list_accounts`, `get_quota` (live local RPC for active account, local snapshot projection for inactive accounts), and `switch_account` (`pickBest: true` ranks from local snapshots with least-recently-used unsnapshotted fallback).
+  - **Bundled stdio MCP server (`0.7.1`) & `/switch-account` skill**: exposes `get_switcher_status`, `list_accounts`, `get_quota` (live local RPC for active account, local snapshot projection for inactive accounts), and `switch_account` (`pickBest: true` ranks from local snapshots with least-recently-used unsnapshotted fallback).
   - **Hard Permission Gate (`Agent Autonomous Switch`, default OFF)**:
     - When **OFF**, the Agent is strictly **read-only** (status, quota, low-quota reminders). Calling `switch_account` fails closed at the MCP server with `AGENT_SWITCH_DISABLED`, and **Auto-Resume After Switch** is automatically turned off and greyed out in the UI.
     - When **ON**, the Agent is authorized to switch on request or at the low-quota hard floor (still protected by the active-work guard), and **Auto-Resume After Switch** can be toggled independently to resume your conversation after restart once the new backend is ready.
@@ -155,8 +155,8 @@ Runtime data is isolated from plugin source files under `~/.gemini/antigravity/s
 
 ## Repository Structure
 
-- `plugin.json` — Plugin manifest (`antigravity-account-switcher`, `0.7.0`)
-- `mcp_config.json` / `scripts/mcp-server.mjs` — Bundled zero-dependency stdio MCP server (`0.7.0`)
+- `plugin.json` — Plugin manifest (`antigravity-account-switcher`, `0.7.1`)
+- `mcp_config.json` / `scripts/mcp-server.mjs` — Bundled zero-dependency stdio MCP server (`0.7.1`)
 - `hooks.json` / `scripts/quota-hook.mjs` — Lightweight `PreInvocation` & `PostInvocation` hooks
 - `skills/switch-account/SKILL.md` — `/switch-account` agent workflow skill
 - `sidecars/switcher/main.mjs` — Sidecar HTTP server, `fs.watch` event-driven quota refresh, security gates & rate limits

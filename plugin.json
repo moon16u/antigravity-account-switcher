@@ -1,7 +1,7 @@
 {
   "name": "antigravity-account-switcher",
   "displayName": "Account Switcher",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "Local-first management of multiple Google Antigravity 2.0 accounts with AES-256-GCM encrypted credential storage, official native Google sign-in, local quota snapshots, and safe account switching across Windows, WSL2, macOS, and Linux.",
   "license": "MIT",
   "author": "moon16u",

@@ -6,6 +6,12 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本（Semantic Versioning）](https://semver.org/lang/zh-CN/)。
 
+## [0.7.1] - 2026-11-28
+
+### 优化
+
+- **优化切号按钮文案为「按余量切换」（`Switch by Quota`）**：将原先的「智能切换」与确认弹窗标题统一调整为更直白克制的「**按余量切换**」/「**Switch by Quota**」，同步刷新 README 中英文高清截图。
+
 ## [0.7.0] - 2026-11-28
 
 重要本地安全升级：将凭据库主密钥从同目录明文 `vault.key` 升级为 **OS Keyring 信封加密**（`sidecars/switcher/key-store.mjs`），提供跨平台零依赖原生凭据库托管、全程 `stdin` 传密钥、强回读校验无痛迁移与安全文件回退。
@@ -136,6 +142,7 @@
 
 - 修复 macOS 下 `runInBackground` 默认值测试断言，并修正 CI 中 DER 证书序列号的正数规范编码（`a9e3bd3`）。
 
+[0.7.1]: https://github.com/moon16u/antigravity-account-switcher/releases/tag/v0.7.1
 [0.7.0]: https://github.com/moon16u/antigravity-account-switcher/releases/tag/v0.7.0
 [0.6.1]: https://github.com/moon16u/antigravity-account-switcher/releases/tag/v0.6.1
 [0.6.0]: https://github.com/moon16u/antigravity-account-switcher/releases/tag/v0.6.0

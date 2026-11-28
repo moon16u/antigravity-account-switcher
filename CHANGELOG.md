@@ -6,6 +6,12 @@ All notable changes to **Antigravity Account Switcher** are documented in this f
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.1] - 2026-11-28
+
+### Changed
+
+- **Clearer button copy (`Switch by Quota` / `按余量切换`)**: renamed the top quota-ranking switch button and confirmation modal title from `Smart Switch` / `智能切换` to **`Switch by Quota`** / **`按余量切换`** to state its local quota-selection behavior plainly, and updated the bilingual README screenshots to match.
+
 ## [0.7.0] - 2026-11-28
 
 Major local-security upgrade: transitions the encrypted vault from a plaintext on-disk `vault.key` file to **OS Keyring envelope encryption** (`sidecars/switcher/key-store.mjs`), with verified zero-data-loss automatic migration, stdin-only secret handling, and safe fallback across all platforms.
@@ -136,6 +142,7 @@ Initial open-source release.
 
 - Fixed macOS `runInBackground` default test assertion and canonical positive DER certificate serial generation in CI (`a9e3bd3`).
 
+[0.7.1]: https://github.com/moon16u/antigravity-account-switcher/releases/tag/v0.7.1
 [0.7.0]: https://github.com/moon16u/antigravity-account-switcher/releases/tag/v0.7.0
 [0.6.1]: https://github.com/moon16u/antigravity-account-switcher/releases/tag/v0.6.1
 [0.6.0]: https://github.com/moon16u/antigravity-account-switcher/releases/tag/v0.6.0

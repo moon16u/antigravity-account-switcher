@@ -2455,7 +2455,7 @@ test('public UI uses external assets and local quota and native account controls
   assert.match(js, /const item = (?:existingItem \|\| )?document\.createElement\('li'\);[\s\S]*?item\.className = acc\.isActive/);
   assert.match(js, /const empty = document\.createElement\('li'\);\s*empty\.className = 'empty-state'/);
   assert.match(js, /t\('switchBtn'\),\s*'btn btn-pill btn-sm'/);
-  assert.match(main, /<div class="card-head-actions">\s*<button\b[^>]*id="smart-switch-btn"[^>]*class="btn btn-pill hidden"[^>]*>智能切换<\/button>\s*<button\b[^>]*id="add-account-btn"/);
+  assert.match(main, /<div class="card-head-actions">\s*<button\b[^>]*id="smart-switch-btn"[^>]*class="btn btn-pill hidden"[^>]*>按余量切换<\/button>\s*<button\b[^>]*id="add-account-btn"/);
   assert.match(css, /\.card-head-actions\s*\{[^}]*\bdisplay:\s*flex;[^}]*\bgap:\s*6px;[^}]*\bflex-wrap:\s*wrap;/);
   assert.match(js, /apiPost\('\/api\/accounts\/best'\)/);
   assert.match(js, /type: 'smart-switch',[\s\S]*?candidate: res\.candidate,[\s\S]*?selectionSource: res\.selectionSource/);

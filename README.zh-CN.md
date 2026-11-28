@@ -14,9 +14,9 @@
 >
 > **使用须知**：作者本人日常也在使用本插件，截至目前尚未遇到因使用本插件导致的账号异常或封禁（如后续出现相关情况，也会第一时间同步说明）。不过同设备多账号切换本身仍存在一定的平台风控边界，建议合理控制切换频率、主力账号按需谨慎使用。本项目为独立开源工具，按 MIT 协议提供，请结合自身情况评估使用（详见[风险提示与免责声明](#风险提示与免责声明)）。
 
-| 悬浮「查看用量」与系统凭据库 | 一键「智能切换」 | 高级设置与硬权限门禁 |
+| 悬浮「查看用量」与系统凭据库 | 按余量切换 | 高级设置与硬权限门禁 |
 | :---: | :---: | :---: |
-| <img src="assets/screenshots/overview-usage-zh.png" alt="账号列表、悬浮查看用量卡片与系统凭据库页脚" width="280" /> | <img src="assets/screenshots/smart-switch-zh.png" alt="一键智能切换原生确认弹窗与本地重置推算" width="280" /> | <img src="assets/screenshots/advanced-settings-zh.png" alt="高级设置原生滑动开关与中风险提示气泡" width="280" /> |
+| <img src="assets/screenshots/overview-usage-zh.png" alt="账号列表、悬浮查看用量卡片与系统凭据库页脚" width="280" /> | <img src="assets/screenshots/smart-switch-zh.png" alt="按余量切换原生确认弹窗与本地重置推算" width="280" /> | <img src="assets/screenshots/advanced-settings-zh.png" alt="高级设置原生滑动开关与中风险提示气泡" width="280" /> |
 
 ## 支持平台
 
@@ -36,11 +36,11 @@
   - 点击「**+ 添加账号**」会自动同步备份当前账号、安全清除当前登录态并重启桌面端应用进入官方 Google 登录页。
   - 完成登录后，回到侧栏点击「**保存当前账号**」即可加密加入切换列表。
   - 在 **Windows 原生**下，打开或刷新侧栏不启动任何子进程；仅在点击「**保存当前账号**」或切号前自动备份时，按需从 Windows 凭据管理器读取 `gemini:antigravity`（优先通过 Python `ctypes` 调用 Win32 `CredReadW`，不可用时回退至无隐藏参数的 `pwsh` / `powershell.exe`）。
-- **本地配额快照、悬浮「查看用量」与一键「智能切换」**：
+- **本地配额快照、悬浮「查看用量」与「按余量切换」**：
   - **当前活跃账号**：按需向本地 `language_server` 查询实时配额（内置 `30 秒` 缓存），并在每次切走前自动采集一次终态快照。
   - **非活跃账号**：直接读取本地快照（`quota-snapshots.json`），**零 RPC、零网络请求**；已过重置时间的配额桶按 100% 推算并标注「**预计已重置** / **预计 100%**」，超过 24 小时的快照显示温和提示，切入后自动校准。
   - **原生悬浮「查看用量」卡片**：悬停或点击每张账号卡底部的「**查看用量**」，以 Antigravity 原生风格悬浮卡片展示分组额度与圆环进度，零页面位移且支持原地刷新。
-  - **一键「智能切换」**：完全基于本地配额快照与重置倒计时推算挑选最优备用号（无快照时回退至最久未用备用号，零远端请求），并在确认弹窗中预览推荐账号与预计余量。
+  - **「按余量切换」**：完全基于本地配额快照与重置倒计时推算挑选余量最充裕的备用号（无快照时回退至最久未用备用号，零远端请求），并在确认弹窗中预览推荐账号与预计余量。
   - 邮箱默认脱敏展示，顶部支持一键显示/隐藏完整邮箱与 **`中 / EN`** 实时切换。
 - **系统凭据库 + AES-256-GCM 信封加密（无备份文件堆积）**：
   - 使用 256 位随机 AES-GCM 主密钥加密保存账号库（`vault.enc.json`）、切号前安全备份（`last-token.enc.json`）及一次性切号任务（`jobs/job-<uuid>.enc.json`）；在 **Windows（凭据管理器）**、**macOS（钥匙串）** 与 **桌面 Linux / 带 D-Bus 的 WSL2（Secret Service）** 下，主密钥自动托管于操作系统原生凭据库（支持老版本 `vault.key` 强校验自动迁移），无 Keyring 环境（如默认 WSL2）自动安全回退至 `0600` 本地密钥文件。
@@ -51,7 +51,7 @@
   - **切号前活跃任务护栏**：自动检测运行中的对话、后台任务、活跃终端与用户子进程，有任务运行时暂停并给出「重新检查并切换」「取消」与记入审计日志（`FORCE_SWITCH_REQUESTED`）的「仍要强制切换」。
 - **事件驱动低额度提醒、MCP 工具与「Agent 自主切号」硬权限门禁**：
   - **随对话周期触发**：`PostInvocation` Hook（`hooks.json` → `scripts/quota-hook.mjs`）写入节流触发文件，Sidecar 通过 `fs.watch` 监听并异步更新本地 `quota-alert.json`，空闲挂机严格零请求。`PreInvocation` Hook 毫秒级读取本地快照，按会话动态浮动阈值（`dynamicThresholdEnabled`，默认开启）分级去重注入提醒（**`soft`** 软性收尾提醒 → **`hard`** 硬下限提醒）。
-  - **内置零依赖 stdio MCP 服务（`0.7.0`）与 `/switch-account` 技能**：提供 `get_switcher_status`、`list_accounts`、`get_quota`（活跃账号实时本地 RPC，非活跃账号本地快照推算）与 `switch_account`（`pickBest: true` 基于本地快照挑选最优备用号，无快照时回退至最久未用备用号）。
+  - **内置零依赖 stdio MCP 服务（`0.7.1`）与 `/switch-account` 技能**：提供 `get_switcher_status`、`list_accounts`、`get_quota`（活跃账号实时本地 RPC，非活跃账号本地快照推算）与 `switch_account`（`pickBest: true` 基于本地快照挑选最优备用号，无快照时回退至最久未用备用号）。
   - **「Agent 自主切号」硬权限开关（默认关闭）**：
     - **关闭时**：Agent 仅具备**只读权限**（查询状态、额度与提醒）；MCP 服务层对 `switch_account` 执行 fail-closed 硬拒绝并返回 `AGENT_SWITCH_DISABLED`，同时「**切号后自动续跑**」自动关闭并在界面中置灰禁用。
     - **开启时**：授权 Agent 在低额度硬下限或用户指令下自主切号（仍受活跃任务护栏约束），「**切号后自动续跑**」也可独立开关，在桌面端应用重启就绪后自动唤醒当前会话继续任务。
@@ -155,8 +155,8 @@
 
 ## 仓库结构
 
-- `plugin.json` — 插件清单（`antigravity-account-switcher`，`0.7.0`）
-- `mcp_config.json` / `scripts/mcp-server.mjs` — 内置零依赖 stdio MCP 服务（`0.7.0`）
+- `plugin.json` — 插件清单（`antigravity-account-switcher`，`0.7.1`）
+- `mcp_config.json` / `scripts/mcp-server.mjs` — 内置零依赖 stdio MCP 服务（`0.7.1`）
 - `hooks.json` / `scripts/quota-hook.mjs` — 轻量事件驱动 `PreInvocation` / `PostInvocation` Hook
 - `skills/switch-account/SKILL.md` — 面向 Agent 的 `/switch-account` 技能工作流
 - `sidecars/switcher/main.mjs` — Sidecar HTTP 服务、`fs.watch` 触发刷新、安全门禁与限流
