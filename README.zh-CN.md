@@ -14,9 +14,9 @@
 >
 > **使用须知**：作者本人日常也在使用本插件，截至目前尚未遇到因使用本插件导致的账号异常或封禁（如后续出现相关情况，也会第一时间同步说明）。不过同设备多账号切换本身仍存在一定的平台风控边界，建议合理控制切换频率、主力账号按需谨慎使用。本项目为独立开源工具，按 MIT 协议提供，请结合自身情况评估使用（详见[风险提示与免责声明](#风险提示与免责声明)）。
 
-<p align="center">
-  <img src="assets/demo.gif" alt="Antigravity Account Switcher 演示动图" width="560" />
-</p>
+| 悬浮「查看用量」与系统凭据库 | 一键「智能切换」 | 高级设置与硬权限门禁 |
+| :---: | :---: | :---: |
+| <img src="assets/screenshots/overview-usage-zh.png" alt="账号列表、悬浮查看用量卡片与系统凭据库页脚" width="280" /> | <img src="assets/screenshots/smart-switch-zh.png" alt="一键智能切换原生确认弹窗与本地重置推算" width="280" /> | <img src="assets/screenshots/advanced-settings-zh.png" alt="高级设置原生滑动开关与中风险提示气泡" width="280" /> |
 
 ## 支持平台
 

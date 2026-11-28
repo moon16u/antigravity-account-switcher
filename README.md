@@ -14,9 +14,9 @@ A cross-platform auxiliary-pane plugin (`SIDECAR_UI_ENTRYPOINT_AUX_PANE`) for **
 >
 > **Heads-up**: I use this plugin myself every day and have not experienced any account issues or bans so far — if that ever changes, I will update this notice promptly. That said, switching multiple accounts on the same device still carries inherent platform policy risk, so please switch sensibly and be mindful with primary accounts. This is an independent MIT-licensed community tool; please assess the risk for your own setup (see [Risk Notice & Disclaimer](#risk-notice--disclaimer)).
 
-<p align="center">
-  <img src="assets/demo.gif" alt="Antigravity Account Switcher Demo" width="560" />
-</p>
+| Floating View Usage & OS Keyring | One-Click Smart Switch | Advanced Settings & Hard Gate |
+| :---: | :---: | :---: |
+| <img src="assets/screenshots/overview-usage-en.png" alt="Account list with floating View Usage popover and OS Keyring footer" width="280" /> | <img src="assets/screenshots/smart-switch-en.png" alt="One-click Smart Switch confirmation modal with local quota projection" width="280" /> | <img src="assets/screenshots/advanced-settings-en.png" alt="Advanced Settings with native sliding switches and risk popover" width="280" /> |
 
 ## Supported Platforms
 
