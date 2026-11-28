@@ -23,7 +23,7 @@
   - 若写入或回读失败（如严格杀软/EDR 拦截或缺少后端），原样保留磁盘 `vault.key` 并无损回退至 `0600` 文件模式，零丢号风险。
   - 若同时存在旧 `vault.key` 与系统凭据库条目且内容不一致，绝不盲删文件，而是以实际能解密 `vault.enc.json` 的密钥为准；若上次迁移在覆写全零后意外中断留下全零残文件，下次启动也会自动识别清理。
   - 支持通过 `SWITCHER_KEY_STORE=file` 显式关闭系统凭据库托管；脱离进程树的切号执行器（`platform.mjs`、`switcher-worker.mjs`）自动继承主进程的密钥存储模式。
-- **诚实威胁边界与只读自检**：主密钥迁入系统凭据库后，即使 `~/.gemini` 目录被误拷走、打包或云盘同步，攻击者也只能拿到无法解密的密文；与所有免主密码的桌面凭据库一样，它仍无法抵御已在本机获得同用户完整执行权限的恶意程序。Windows 用户可随时运行 `cmdkey /list:antigravity-account-switcher:vault-key` 核验凭据条目元信息（不会输出密钥）。
+- **诚实威胁边界与便捷自检**：主密钥迁入系统凭据库后，即使 `~/.gemini` 目录被误拷走、打包或云盘同步，攻击者也只能拿到无法解密的密文；与所有免主密码的桌面凭据库一样，它仍无法抵御已在本机获得同用户完整执行权限的恶意程序。Windows 用户可在 **控制面板 → 凭据管理器 → Windows 凭据 → 普通凭据 → `antigravity-account-switcher:vault-key`** 直接查看条目（或运行 `cmdkey /list:antigravity-account-switcher:vault-key`，仅显示元信息不暴露密钥）；macOS 用户可在 **钥匙串访问 → 登录 → `antigravity-account-switcher`** 查看。
 
 ### 界面、测试与工程维护
 
