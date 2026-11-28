@@ -8,17 +8,28 @@
 
 ## [0.7.0] - 2026-11-28
 
-将本地凭据库升级为 **OS Keyring 信封加密**（`sidecars/switcher/key-store.mjs`）：把 256 位 AES-GCM 主密钥迁入操作系统原生凭据库，支持强回读校验无痛迁移与安全文件回退。
+重要本地安全升级：将凭据库主密钥从同目录明文 `vault.key` 升级为 **OS Keyring 信封加密**（`sidecars/switcher/key-store.mjs`），提供跨平台零依赖原生凭据库托管、全程 `stdin` 传密钥、强回读校验无痛迁移与安全文件回退。
 
-### 新增
+### 安全与密钥存储架构
 
-- **系统凭据库主密钥托管**（`sidecars/switcher/key-store.mjs`）：将 256 位主密钥存入 **Windows 凭据管理器**（优先 Python `ctypes` 直接调用 `CredWriteW` / `CredReadW`，回退普通非隐藏 `pwsh` / `powershell.exe`）、**macOS 钥匙串**（`/usr/bin/security`）或 **Linux / WSL2 Secret Service**（检测到 `DBUS_SESSION_BUS_ADDRESS` 时走 `secret-tool`）。密钥写入全程经 `stdin` 管道传递、绝不进入命令行参数，且单进程内做内存缓存（每个进程最多读取一次系统凭据库）。
-- **强校验自动迁移与安全回退**：老用户升级后首次读取自动将现有 `vault.key` 写入系统凭据库，**强制回读逐字节比对一致**后才覆写清零并删除磁盘旧明文文件（审计日志记录 `VAULT_KEY_MIGRATED`）；若凭据库不可用、受阻或与现有密文冲突，原样保留 `vault.key` 并无损回退至 `0600` 文件模式（亦支持 `SWITCHER_KEY_STORE=file` 显式指定）。
-- **页脚加密来源展示与测试扩充**：`/api/state` 仅暴露脱敏的 `vaultKeySource`（`keyring` / `file`）并在侧栏底部如实显示，脱离进程树的切号执行器自动继承密钥存储模式，双模式全隔离测试扩充至 **89 项**。
+- **OS Keyring 信封加密**（`sidecars/switcher/key-store.mjs`）：`vault.enc.json`、`last-token.enc.json` 与一次性 `jobs/*.enc.json` 继续以 AES-256-GCM 密文保存在磁盘，仅将 256 位（64 字节 hex）主密钥迁入操作系统原生凭据库（条目名 `antigravity-account-switcher:vault-key`）。相比把整段 OAuth 凭证直接塞进凭据库，信封加密彻底避开 Windows 凭据管理器单条 2.5 KB 硬上限，同时与旧版密文格式 100% 向后兼容。
+- **零依赖跨平台后端与全程 `stdin` 防泄露**：
+  - **Windows（`win32`）**：优先通过 Python `ctypes` 直接调用 `advapi32.dll`（`CredReadW` / `CredWriteW`）读写普通凭据（无需拉起 PowerShell、避开 AMSI），无 Python 时回退至普通非隐藏 `pwsh` / `powershell.exe`（严禁 `-WindowStyle Hidden` 与 `-EncodedCommand`）。
+  - **macOS（`darwin`）**：使用 `/usr/bin/security`（`find-generic-password` / `security -i` 管道写入），并防止将 64 位 hex 主密钥误当作十六进制编码二次解码。
+  - **Linux / WSL2（`linux` / `wsl`）**：检测到 `DBUS_SESSION_BUS_ADDRESS` 时自动走 `secret-tool`；默认无 D-Bus 的 WSL2 与无头 Linux 自动安全回退至 `0600` `vault.key` 文件存储。
+  - 所有后端写入密钥**严格经 `stdin` 管道传入、绝不出现在命令行参数（argv）中**，并在单进程内做内存缓存（Sidecar / MCP / Worker 每个进程生命周期最多读一次系统凭据库）。
+- **强回读校验自动迁移与冲突/失败兜底**：
+  - 老用户升级后首次读取凭据库时自动触发迁移：将现有 `vault.key` 写入系统凭据库 → **强制回读并逐字节比对一致** → 校验 100% 通过后才以全零覆写（`fsync`）并删除旧明文 `vault.key`（审计日志仅记录 `VAULT_KEY_MIGRATED <backend>`，绝不记录密钥内容）。
+  - 若写入或回读失败（如严格杀软/EDR 拦截或缺少后端），原样保留磁盘 `vault.key` 并无损回退至 `0600` 文件模式，零丢号风险。
+  - 若同时存在旧 `vault.key` 与系统凭据库条目且内容不一致，绝不盲删文件，而是以实际能解密 `vault.enc.json` 的密钥为准；若上次迁移在覆写全零后意外中断留下全零残文件，下次启动也会自动识别清理。
+  - 支持通过 `SWITCHER_KEY_STORE=file` 显式关闭系统凭据库托管；脱离进程树的切号执行器（`platform.mjs`、`switcher-worker.mjs`）自动继承主进程的密钥存储模式。
+- **诚实威胁边界与只读自检**：主密钥迁入系统凭据库后，即使 `~/.gemini` 目录被误拷走、打包或云盘同步，攻击者也只能拿到无法解密的密文；与所有免主密码的桌面凭据库一样，它仍无法抵御已在本机获得同用户完整执行权限的恶意程序。Windows 用户可随时运行 `cmdkey /list:antigravity-account-switcher:vault-key` 核验凭据条目元信息（不会输出密钥）。
 
-### 优化
+### 界面、测试与工程维护
 
-- **CI 依赖升级**：将 GitHub Actions 工作流升级至 `actions/checkout@v5` 与 `actions/setup-node@v5`。
+- **页脚加密来源展示**：`/api/state` 仅暴露脱敏字段 `vaultKeySource`（`keyring` / `file`），使用系统凭据库时侧栏底部显示「`系统凭据库 + AES-256-GCM 本地加密 · …`」。
+- **扩充全隔离测试**：新增 26 项单元与集成测试，覆盖三端后端、stdin 写入、迁移回读校验、失败保底、密钥冲突裁决、进程内缓存、脱离 worker 继承与页脚展示，标准与 `--use-env-proxy` 双模式共 **89 项测试全绿**。
+- **CI 依赖升级**：将 `.github/workflows/ci.yml` 升级至 `actions/checkout@v5` 与 `actions/setup-node@v5`。
 
 ## [0.6.1] - 2026-11-28
 

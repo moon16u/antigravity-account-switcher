@@ -8,17 +8,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [0.7.0] - 2026-11-28
 
-Upgrades local vault encryption to **OS Keyring envelope encryption** (`sidecars/switcher/key-store.mjs`): stores the 256-bit AES-GCM master key in your operating system's native secret store with verified automatic migration and safe file fallback.
+Major local-security upgrade: transitions the encrypted vault from a plaintext on-disk `vault.key` file to **OS Keyring envelope encryption** (`sidecars/switcher/key-store.mjs`), with verified zero-data-loss automatic migration, stdin-only secret handling, and safe fallback across all platforms.
 
-### Added
+### Security & Storage Architecture
 
-- **OS Keyring master key storage** (`sidecars/switcher/key-store.mjs`): stores the 256-bit vault key in **Windows Credential Manager** (`CredWriteW` / `CredReadW` via Python `ctypes` primary with plain non-hidden `pwsh` / `powershell.exe` fallback), **macOS Keychain** (`/usr/bin/security`), or **Linux / WSL2 Secret Service** (`secret-tool` when `DBUS_SESSION_BUS_ADDRESS` is set). All secrets pass strictly over `stdin` (never in CLI arguments), and each process caches the key in memory after a single read.
-- **Verified automatic migration & safe fallback**: existing `vault.key` files migrate automatically on first read — the switcher writes to the OS Keyring, reads back to verify byte-for-byte equality, and only then wipes and removes the legacy plaintext file (logging `VAULT_KEY_MIGRATED`). If the keyring is unavailable, blocked, or disagrees with an existing encrypted vault, it preserves `vault.key` intact and falls back safely to `0600` file storage (with `SWITCHER_KEY_STORE=file` available as an explicit override).
-- **Footer storage indicator & expanded tests**: `/api/state` exposes only a sanitized `vaultKeySource` (`'keyring'` or `'file'`) reflected in the sidebar footer, detached workers inherit the storage mode cleanly, and isolated tests grow to **89 passing tests**.
+- **OS Keyring envelope encryption** (`sidecars/switcher/key-store.mjs`): keeps `vault.enc.json`, `last-token.enc.json`, and single-use `jobs/*.enc.json` as AES-256-GCM ciphertexts on disk while moving the 256-bit (64-char hex) master key into the operating system's native secret store (`antigravity-account-switcher:vault-key`). Storing the 64-byte master key instead of full OAuth tokens avoids Windows Credential Manager's 2.5 KB per-entry limit and keeps all existing encrypted files 100% backwards-compatible.
+- **Zero-dependency cross-platform backends with `stdin`-only secret passing**:
+  - **Windows (`win32`)**: reads/writes Generic Credential `antigravity-account-switcher:vault-key` via Python `ctypes` calling `advapi32.dll` (`CredReadW` / `CredWriteW`) first (avoiding PowerShell & AMSI), with plain non-hidden `pwsh` / `powershell.exe` fallback (never `-WindowStyle Hidden` or `-EncodedCommand`).
+  - **macOS (`darwin`)**: uses `/usr/bin/security` (`find-generic-password` / `security -i` stdin write) with a guard against accidentally hex-decoding 64-char hex keys.
+  - **Linux & WSL2 (`linux` / `wsl`)**: uses `secret-tool` when `DBUS_SESSION_BUS_ADDRESS` is available; default WSL2 and headless Linux cleanly fall back to `0600` `vault.key` file storage.
+  - Every backend passes secrets strictly over **`stdin`**, never in CLI arguments (`argv`), and caches the resolved key in process memory (at most one keyring read per process lifetime).
+- **Verified automatic migration & safe conflict/failure handling**:
+  - Upgrading users are migrated automatically on first vault load: the switcher writes the existing `vault.key` to the OS Keyring, **reads it back to verify byte-for-byte equality**, and only then overwrites the legacy file with zeros (`fsync`) before unlinking it (logging `VAULT_KEY_MIGRATED <backend>` with zero secret exposure).
+  - If writing or read-back verification fails (e.g. strict AV/EDR or missing backend), the original `vault.key` is left completely untouched and the switcher falls back to `0600` file storage with zero data loss.
+  - If a legacy `vault.key` and a keyring entry ever disagree, the switcher never deletes the file blindly — it tests decryption against `vault.enc.json` to keep the working key, and cleans up any interrupted zeroed tombstone automatically.
+  - Set `SWITCHER_KEY_STORE=file` to opt out of OS Keyring storage explicitly; detached switch workers automatically inherit the resolved storage mode (`platform.mjs`, `switcher-worker.mjs`).
+- **Transparent threat-model boundary**: moving the master key into the OS Keyring protects against directory exfiltration, accidental cloud sync, and cross-user reads; as with all passwordless desktop keyrings, it still cannot defend against malware already running with full same-user permissions. On Windows you can verify the stored metadata safely (without exposing the key) via `cmdkey /list:antigravity-account-switcher:vault-key`.
 
-### Changed
+### UI, Tests & Maintenance
 
-- **CI maintenance**: upgraded GitHub Actions workflow steps to `actions/checkout@v5` and `actions/setup-node@v5`.
+- **Footer storage indicator**: `/api/state` exposes only a sanitized `vaultKeySource` (`'keyring'` or `'file'`), updating the sidebar footer to display `OS Keyring + AES-256-GCM encrypted` when backed by the OS Keyring.
+- **Expanded isolated test suite**: added 26 new unit and integration tests covering all OS backends, stdin-only writes, verified migration, rollback on failure, conflict handling, in-process caching, detached-worker inheritance, and footer rendering (**89 passing tests** in both standard and `--use-env-proxy` modes).
+- **CI actions upgraded**: updated `.github/workflows/ci.yml` to `actions/checkout@v5` and `actions/setup-node@v5`.
 
 ## [0.6.1] - 2026-11-28
 
