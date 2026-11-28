@@ -29,7 +29,7 @@ import {
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const WORKER_SCRIPT = join(__dirname, '..', 'sidecars', 'switcher', 'switcher-worker.mjs');
 const MAX_RPC_BUFFER_BYTES = 2 * 1024 * 1024;
-const SERVER_VERSION = '0.6.1';
+const SERVER_VERSION = '0.7.0';
 const FIXED_RESUME_MESSAGE = '账号已切换完成，请继续刚才未完成的任务。';
 
 export const MCP_TOOLS = Object.freeze([
@@ -146,7 +146,7 @@ export function createMcpHandlers(options = {}) {
   const spawnWorker =
     options.spawnWorker ||
     ((jobPath, dataDir = paths.dataDir, workerEnv = env) =>
-      spawnDetachedWorker(WORKER_SCRIPT, jobPath, workerEnv, undefined, { dataDir }));
+      spawnDetachedWorker(WORKER_SCRIPT, jobPath, workerEnv, undefined, { dataDir, useKeyring: paths.useKeyring }));
 
   async function resolveLiveContext() {
     const liveHub = await discoverHubFn(env, { appDataDir: paths.appDataDir }).catch(() => null);
@@ -166,6 +166,7 @@ export function createMcpHandlers(options = {}) {
     const accounts = listPublicAccounts(paths, effectiveActiveEmail, {
       revealEmails: false,
       activeTierName: lsConnected ? lsTierName : '',
+      env: lsEnv,
     });
     const activeAccount = accounts.find((a) => a.isActive) || null;
     const contextKey = JSON.stringify([liveHub?.lsAddress, liveHub?.csrfToken, liveHub?.pid, effectiveActiveEmail]);

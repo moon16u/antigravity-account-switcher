@@ -6,6 +6,20 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本（Semantic Versioning）](https://semver.org/lang/zh-CN/)。
 
+## [0.7.0] - 2026-11-28
+
+将本地凭据库升级为 **OS Keyring 信封加密**（`sidecars/switcher/key-store.mjs`）：把 256 位 AES-GCM 主密钥迁入操作系统原生凭据库，支持强回读校验无痛迁移与安全文件回退。
+
+### 新增
+
+- **系统凭据库主密钥托管**（`sidecars/switcher/key-store.mjs`）：将 256 位主密钥存入 **Windows 凭据管理器**（优先 Python `ctypes` 直接调用 `CredWriteW` / `CredReadW`，回退普通非隐藏 `pwsh` / `powershell.exe`）、**macOS 钥匙串**（`/usr/bin/security`）或 **Linux / WSL2 Secret Service**（检测到 `DBUS_SESSION_BUS_ADDRESS` 时走 `secret-tool`）。密钥写入全程经 `stdin` 管道传递、绝不进入命令行参数，且单进程内做内存缓存（每个进程最多读取一次系统凭据库）。
+- **强校验自动迁移与安全回退**：老用户升级后首次读取自动将现有 `vault.key` 写入系统凭据库，**强制回读逐字节比对一致**后才覆写清零并删除磁盘旧明文文件（审计日志记录 `VAULT_KEY_MIGRATED`）；若凭据库不可用、受阻或与现有密文冲突，原样保留 `vault.key` 并无损回退至 `0600` 文件模式（亦支持 `SWITCHER_KEY_STORE=file` 显式指定）。
+- **页脚加密来源展示与测试扩充**：`/api/state` 仅暴露脱敏的 `vaultKeySource`（`keyring` / `file`）并在侧栏底部如实显示，脱离进程树的切号执行器自动继承密钥存储模式，双模式全隔离测试扩充至 **89 项**。
+
+### 优化
+
+- **CI 依赖升级**：将 GitHub Actions 工作流升级至 `actions/checkout@v5` 与 `actions/setup-node@v5`。
+
 ## [0.6.1] - 2026-11-28
 
 ### 优化
@@ -111,6 +125,7 @@
 
 - 修复 macOS 下 `runInBackground` 默认值测试断言，并修正 CI 中 DER 证书序列号的正数规范编码（`a9e3bd3`）。
 
+[0.7.0]: https://github.com/moon16u/antigravity-account-switcher/releases/tag/v0.7.0
 [0.6.1]: https://github.com/moon16u/antigravity-account-switcher/releases/tag/v0.6.1
 [0.6.0]: https://github.com/moon16u/antigravity-account-switcher/releases/tag/v0.6.0
 [0.5.0]: https://github.com/moon16u/antigravity-account-switcher/releases/tag/v0.5.0

@@ -20,6 +20,7 @@ import {
   appendSwitchLog,
   captureCurrentAccount,
   ensureSecureDir,
+  getVaultKeySource,
   listPublicAccounts,
   maskEmail,
   normalizeEmail,
@@ -142,6 +143,7 @@ export async function createApp(options = {}) {
 
   const uiToken = String(env.ANTIGRAVITY_SIDECAR_UI_TOKEN || '');
   const paths = resolvePaths(env, options.pathOverrides);
+  const tokenStoreOpts = options.tokenStoreOpts;
   const callLsRpcFn = options.callLsRpc || callLsRpc;
   const quotaService = options.quotaService || createQuotaService({ paths, env, callLsRpcFn });
   const getUserStatus = options.getUserStatus || (() => fetchLsUserStatus(env, callLsRpcFn));
@@ -150,7 +152,7 @@ export async function createApp(options = {}) {
   const spawnWorker =
     options.spawnWorker ||
     ((jobPath, dataDir = paths.dataDir) =>
-      spawnDetachedWorker(WORKER_SCRIPT, jobPath, env, undefined, { dataDir }));
+      spawnDetachedWorker(WORKER_SCRIPT, jobPath, env, undefined, { dataDir, useKeyring: paths.useKeyring }));
   const readLimit = createRateLimiter(options.readLimit ?? 60, 60_000);
   const writeLimit = createRateLimiter(options.writeLimit ?? 10, 60_000);
   const settingsLimit = createRateLimiter(options.settingsLimit ?? 25, 60_000);
@@ -208,18 +210,18 @@ export async function createApp(options = {}) {
   }
 
   async function buildStatePayload({ revealEmails = false } = {}) {
-    const active = readActiveToken(paths, env);
+    const active = readActiveToken(paths, env, tokenStoreOpts);
     const lsUser = await getUserStatus();
     const effectiveActiveEmail = normalizeEmail((lsUser.lsConnected ? lsUser.email : '') || active.email);
     const activeTierName = lsUser.lsConnected ? lsUser.tierName : '';
     if (lsUser.lsConnected && lsUser.email && activeTierName) {
       try {
-        syncActiveAccountTier(paths, { email: lsUser.email, tierName: activeTierName });
+        syncActiveAccountTier(paths, { email: lsUser.email, tierName: activeTierName, env });
       } catch {
         // Best-effort tier persistence; do not fail state read
       }
     }
-    const accounts = listPublicAccounts(paths, effectiveActiveEmail, { revealEmails, activeTierName });
+    const accounts = listPublicAccounts(paths, effectiveActiveEmail, { revealEmails, activeTierName, env });
     stateIdentity = {
       tokenEmail: active.email,
       activeId: accounts.find(a => a.isActive)?.id,
@@ -230,6 +232,7 @@ export async function createApp(options = {}) {
       ok: true,
       active: sanitizeActiveState(active, lsUser, { revealEmail: revealEmails }),
       accounts,
+      vaultKeySource: getVaultKeySource(paths, env),
       logs: readRecentLogs(paths, 30),
       settings: loadGuardSettings(paths),
       quotaAlert: readQuotaAlertSnapshot(paths),
@@ -241,8 +244,8 @@ export async function createApp(options = {}) {
     pendingRefresh = pendingRefresh.then(async () => {
       const lsUser = await getUserStatus();
       if (!lsUser.lsConnected) return readQuotaAlertSnapshot(paths);
-      const activeEmail = normalizeEmail(lsUser.email) || readActiveToken(paths, env).email;
-      const accounts = listPublicAccounts(paths, activeEmail, { activeTierName: lsUser.tierName });
+      const activeEmail = normalizeEmail(lsUser.email) || readActiveToken(paths, env, tokenStoreOpts).email;
+      const accounts = listPublicAccounts(paths, activeEmail, { activeTierName: lsUser.tierName, env });
       const activeAccount = accounts.find((acc) => acc.isActive);
       const activeAccountId = activeAccount?.id || '';
       const settings = loadGuardSettings(paths);
@@ -349,12 +352,13 @@ export async function createApp(options = {}) {
           fallbackEmail: lsUser.email,
           tierName: lsUser.lsConnected ? lsUser.tierName : '',
           env,
+          tokenStoreOpts,
         });
         if (lsUser.lsConnected) {
           try {
             // The credential file can still belong to the previous LS user.
-            const activeEmail = normalizeEmail(lsUser.email) || readActiveToken(paths, env).email;
-            if (listPublicAccounts(paths, activeEmail).some((acc) => acc.id === saved.id && acc.isActive)) {
+            const activeEmail = normalizeEmail(lsUser.email) || readActiveToken(paths, env, tokenStoreOpts).email;
+            if (listPublicAccounts(paths, activeEmail, { env }).some((acc) => acc.id === saved.id && acc.isActive)) {
               await quotaService.fetchActiveQuota({
                 accountId: saved.id, tierName: lsUser.tierName, syncSource: 'capture', forceRefresh: true,
               });
@@ -379,12 +383,12 @@ export async function createApp(options = {}) {
       const blocked = requireSecurityGate(readLimit);
       if (blocked) return blocked;
       try {
-        const active = readActiveToken(paths, env);
+        const active = readActiveToken(paths, env, tokenStoreOpts);
         // Reuse the panel's last LS identity while the local credential still matches.
         const identity = stateIdentity?.tokenEmail === active.email ? stateIdentity : null;
         const activeEmail = identity?.activeEmail || active.email;
         const revealEmails = Boolean(data?.revealEmails);
-        const accounts = listPublicAccounts(paths, activeEmail, { revealEmails, activeTierName: identity?.activeTierName });
+        const accounts = listPublicAccounts(paths, activeEmail, { revealEmails, activeTierName: identity?.activeTierName, env });
         const backups = accounts.filter((acc) => !acc.isActive);
         if (!backups.length) {
           return jsonResponse({ ok: false, code: 'NO_BACKUP_ACCOUNT', message: '暂无可切换的备用账号。' });
@@ -451,10 +455,10 @@ export async function createApp(options = {}) {
       try {
         // A known inactive account can be projected without probing the LS.
         // Recheck identity before attributing a live summary to any account.
-        const active = readActiveToken(paths, env);
+        const active = readActiveToken(paths, env, tokenStoreOpts);
         const activeId = stateIdentity && stateIdentity.tokenEmail === active.email
           ? stateIdentity.activeId
-          : active.email && listPublicAccounts(paths, active.email).find(a => a.isActive)?.id;
+          : active.email && listPublicAccounts(paths, active.email, { env }).find(a => a.isActive)?.id;
         const lsUser = activeId && activeId === data?.id ? await getUserStatus() : null;
         const effectiveActiveEmail = normalizeEmail((lsUser?.lsConnected ? lsUser.email : '') || active.email);
         const result = await quotaService.getAccountUsage({
@@ -482,6 +486,7 @@ export async function createApp(options = {}) {
         renameAccount(paths, {
           id: data?.id,
           label: typeof data?.label === 'string' ? data.label : '',
+          env,
         });
         const state = await buildStatePayload({ revealEmails: Boolean(data?.revealEmails) });
         return jsonResponse({ ...state, message: '已更新账号别名' });
@@ -499,7 +504,7 @@ export async function createApp(options = {}) {
       const blocked = requireSecurityGate(writeLimit);
       if (blocked) return blocked;
       try {
-        removeAccount(paths, { id: data?.id });
+        removeAccount(paths, { id: data?.id, env });
         quotaService.invalidateCache();
         deleteQuotaSnapshot(paths, data?.id);
         const state = await buildStatePayload({ revealEmails: Boolean(data?.revealEmails) });
@@ -544,8 +549,8 @@ export async function createApp(options = {}) {
       const lsUser = await getUserStatus();
       if (lsUser.lsConnected) {
         try {
-          const activeEmail = normalizeEmail(lsUser.email) || readActiveToken(paths, env).email;
-          const activeAccount = listPublicAccounts(paths, activeEmail).find((acc) => acc.isActive);
+          const activeEmail = normalizeEmail(lsUser.email) || readActiveToken(paths, env, tokenStoreOpts).email;
+          const activeAccount = listPublicAccounts(paths, activeEmail, { env }).find((acc) => acc.isActive);
           await quotaService.capturePreSwitchSnapshot({ accountId: activeAccount?.id || '', tierName: lsUser.tierName });
         } catch {
           // A failed quota capture must not block switching.
@@ -569,6 +574,7 @@ export async function createApp(options = {}) {
         accountId,
         fallbackEmail: lsUser.email,
         env,
+        tokenStoreOpts,
         context: jobContext,
         syncOnboarding: Boolean(settings.skipOnboardingPrompt),
         relaunchPauseMs: computeNaturalPauseMs({ enabled: settings.naturalPauseEnabled }),

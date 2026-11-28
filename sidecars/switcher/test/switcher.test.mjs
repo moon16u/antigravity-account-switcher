@@ -9,6 +9,7 @@ import {
   readFileSync,
   rmSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import http from 'node:http';
@@ -17,6 +18,7 @@ import { dirname, join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import { runInNewContext } from 'node:vm';
 import {
   extractActiveItemsFromLs,
   findUserChildProcesses,
@@ -24,6 +26,16 @@ import {
   parsePsOutput,
 } from '../active-work.mjs';
 import { createApp } from '../main.mjs';
+import {
+  createVaultKeyBackend,
+  getCachedVaultKeyInfo,
+  parseVaultKeyHex,
+  resolveVaultKey,
+  shouldUseVaultKeyring,
+  VAULT_KEYRING_ACCOUNT,
+  VAULT_KEYRING_SERVICE,
+  WIN_VAULT_KEY_TARGET,
+} from '../key-store.mjs';
 import { readQuotaAlertSnapshot, saveGuardSettings, writeQuotaRefreshTrigger } from '../quota-guard.mjs';
 import {
   createQuotaService,
@@ -66,8 +78,10 @@ import {
 } from '../token-store.mjs';
 import {
   captureCurrentAccount,
+  clearVaultKeyCache,
   decryptPayload,
   getOrCreateKey,
+  getVaultKeySource,
   importAccount,
   listPublicAccounts,
   loadVault,
@@ -198,6 +212,473 @@ function makeSandbox(t) {
   assert.equal(paths.useKeyring, false);
   return { root, geminiDir, dataDir, env, paths };
 }
+
+function mockVaultKeyring(keyHex = '') {
+  return {
+    keyHex,
+    name: 'python',
+    reads: 0,
+    writes: [],
+    read() {
+      this.reads += 1;
+      return { ok: true, found: Boolean(this.keyHex), keyHex: this.keyHex, backend: this.name };
+    },
+    write(hex) {
+      this.writes.push(hex);
+      this.keyHex = hex;
+    },
+  };
+}
+
+test('vault keyring routing respects path overrides, file settings, and D-Bus availability', (t) => {
+  const { root, paths } = makeSandbox(t);
+  const env = { ANTIGRAVITY_EXECUTABLE_DATA_DIR: paths.dataDir, DBUS_SESSION_BUS_ADDRESS: 'unix:path=/test-bus' };
+  assert.equal(resolvePaths(env).useKeyring, true);
+  for (const name of ['tokenPath', 'geminiDir', 'dataDir']) {
+    assert.equal(resolvePaths(env, { [name]: join(root, name) }).useKeyring, false);
+  }
+  for (const name of ['SWITCHER_KEY_STORE', 'SWITCHER_TOKEN_STORE']) {
+    assert.equal(resolvePaths({ ...env, [name]: 'file' }).useKeyring, false);
+    assert.equal(shouldUseVaultKeyring({}, { ...env, [name]: 'file' }, 'win32'), false);
+  }
+  assert.equal(shouldUseVaultKeyring(paths, env, 'darwin'), false);
+  assert.equal(shouldUseVaultKeyring({}, {}, 'win32'), true);
+  assert.equal(shouldUseVaultKeyring({}, {}, 'darwin'), true);
+  assert.equal(shouldUseVaultKeyring({}, env, 'freebsd'), false);
+  for (const runtime of ['linux', 'wsl']) {
+    assert.equal(shouldUseVaultKeyring({}, {}, runtime), false);
+    assert.equal(shouldUseVaultKeyring({}, env, runtime), true);
+    assert.equal(createVaultKeyBackend(runtime, {}), null);
+  }
+  const hex = 'Ab'.repeat(32);
+  assert.equal(parseVaultKeyHex(hex), hex.toLowerCase());
+  for (const invalid of [hex.slice(1), `${hex}\n`, 'zz'.repeat(32), null]) {
+    assert.throws(() => parseVaultKeyHex(invalid), { message: 'INVALID_KEY_FILE' });
+  }
+});
+
+test('Windows vault keyring uses Python ctypes stdin and stops on explicit credential results', () => {
+  const keyHex = '25a9'.repeat(16);
+  assert.equal(WIN_VAULT_KEY_TARGET, 'antigravity-account-switcher:vault-key');
+  const calls = [];
+  let readOutput = `CRED_B64:${Buffer.from(keyHex, 'utf16le').toString('base64')}\r\n`;
+  const env = { SystemRoot: 'C:\\Windows' };
+  const backend = createVaultKeyBackend('win32', env, {
+    execFn(bin, args, opts) {
+      calls.push({ bin, args, opts });
+      return opts.input === undefined ? readOutput : '';
+    },
+  });
+
+  assert.throws(() => backend.write('unsafe\nargument'), { message: 'INVALID_KEY_FILE' });
+  assert.equal(calls.length, 0);
+  assert.equal(backend.write(keyHex), true);
+  const [write] = calls;
+  assert.equal(write.bin, 'python');
+  assert.equal(write.args[0], '-c');
+  assert.equal(write.opts.input, `${keyHex}\n`);
+  assert.equal(write.opts.stdio[0], 'pipe');
+  assert.equal(write.args.some(arg => arg.includes(keyHex)), false);
+  assert.match(write.args[1], /api\.CredWriteW\(c\.byref\(cred\), 0\)/);
+  assert.match(write.args[1], /sys\.stdin\.readline\(\).*\.encode\('utf-8'\)/);
+  const struct = write.args[1].match(/_fields_ = \[([\s\S]*?)\]/)[1];
+  assert.deepEqual(Array.from(struct.matchAll(/\('([A-Za-z]+)',/g), match => match[1]), [
+    'Flags', 'Type', 'TargetName', 'Comment', 'LastWritten', 'CredentialBlobSize', 'CredentialBlob',
+    'Persist', 'AttributeCount', 'Attributes', 'TargetAlias', 'UserName',
+  ]);
+  assert.match(write.args[1], /Credential\(0, 1, target, None, w\.FILETIME\(\), len\(secret\), c\.cast\(blob, c\.c_void_p\),\s+2, 0, None, None, 'vault-key'\)/);
+  assert.ok(write.args[1].includes(WIN_VAULT_KEY_TARGET));
+
+  assert.deepEqual(backend.read(), { ok: true, found: true, keyHex, backend: 'python' });
+  assert.equal(calls[1].bin, 'python');
+  assert.equal(calls[1].opts.input, undefined);
+  assert.match(calls[1].args[1], /api\.CredReadW\(target, 1, 0, c\.byref\(ptr\)\)/);
+  readOutput = 'CRED_NOT_FOUND\r\n';
+  assert.deepEqual(backend.read(), { ok: true, found: false, keyHex: '', backend: 'python' });
+  readOutput = 'CRED_B64:YmFk\n';
+  assert.deepEqual(backend.read(), { ok: false, found: true, keyHex: '', backend: 'python' });
+  assert.deepEqual(calls.map(call => call.bin), ['python', 'python', 'python', 'python']);
+
+  assert.equal(backend.remove(), true);
+  assert.equal(calls[4].bin, join(env.SystemRoot, 'System32', 'cmdkey.exe'));
+  assert.deepEqual(calls[4].args, [`/delete:${WIN_VAULT_KEY_TARGET}`]);
+  assert.equal(calls[4].opts.windowsHide, true);
+});
+
+test('Windows vault keyring uses plain PowerShell after Python invocation failures', () => {
+  const keyHex = '782e'.repeat(16);
+  const calls = [];
+  const backend = createVaultKeyBackend('win32', {}, {
+    execFn(bin, args, opts) {
+      calls.push({ bin, args, opts });
+      if (bin === 'pwsh' && opts.input !== undefined) return '';
+      if (bin === 'powershell.exe') return `CRED_B64:${Buffer.from(keyHex).toString('base64')}\n`;
+      throw Object.assign(new Error('fixture invocation failure'), { stderr: keyHex });
+    },
+  });
+  assert.equal(backend.write(keyHex), true);
+  const writeCalls = calls.splice(0);
+  assert.deepEqual(writeCalls.map(call => call.bin), ['python', 'py', 'python3', 'pwsh']);
+  assert.deepEqual(writeCalls[1].args.slice(0, 2), ['-3', '-c']);
+  for (const { args, opts } of writeCalls) {
+    assert.equal(opts.input, `${keyHex}\n`);
+    assert.equal(args.some(arg => arg.includes(keyHex)), false);
+  }
+  assert.match(writeCalls[3].args[3], /::Write\(\[Console\]::In\.ReadLine\(\)\)/);
+  assert.match(writeCalls[3].args[3], /CredWriteW\(ref cred, 0\)/);
+  assert.deepEqual(backend.read(), { ok: true, found: true, keyHex, backend: 'powershell' });
+  assert.deepEqual(calls.map(call => call.bin), ['python', 'py', 'python3', 'pwsh', 'powershell.exe']);
+  for (const { args } of [writeCalls[3], calls[3], calls[4]]) {
+    assert.deepEqual(args.slice(0, 3), ['-NoProfile', '-NonInteractive', '-Command']);
+    assert.doesNotMatch(args.join(' '), /-WindowStyle|-EncodedCommand/);
+  }
+});
+
+test('macOS vault keyring preserves plain hex and only decodes hex-encoded ASCII', () => {
+  const keyHex = '4cf9'.repeat(16);
+  const calls = [];
+  let output = `  ${keyHex.toUpperCase()}\n`;
+  const backend = createVaultKeyBackend('darwin', {}, {
+    execFn(bin, args, opts) {
+      calls.push({ bin, args, opts });
+      if (output instanceof Error) throw output;
+      return output;
+    },
+  });
+  assert.equal(VAULT_KEYRING_SERVICE, 'antigravity-account-switcher');
+  assert.equal(VAULT_KEYRING_ACCOUNT, 'vault-key');
+  assert.equal(backend.write(keyHex), true);
+  assert.deepEqual(calls[0].args, ['-i']);
+  assert.equal(calls[0].opts.input, `add-generic-password -U -s ${VAULT_KEYRING_SERVICE} -a vault-key -w "${keyHex}"\n`);
+  assert.deepEqual(backend.read(), { ok: true, found: true, keyHex: keyHex.toUpperCase(), backend: 'security' });
+  assert.deepEqual(calls[1].args, ['find-generic-password', '-s', VAULT_KEYRING_SERVICE, '-a', 'vault-key', '-w']);
+  output = Buffer.from(keyHex).toString('hex');
+  assert.equal(backend.read().keyHex, keyHex);
+  assert.equal(backend.remove(), true);
+  assert.deepEqual(calls[3].args, ['delete-generic-password', '-s', VAULT_KEYRING_SERVICE, '-a', 'vault-key']);
+  output = Object.assign(new Error(), { status: 44 });
+  assert.deepEqual(backend.read(), { ok: true, found: false, keyHex: '', backend: 'security' });
+  assert.ok(calls.every(call => call.bin === '/usr/bin/security' && !call.args.join(' ').includes(keyHex)));
+});
+
+test('Linux and WSL vault keyrings use Secret Service lookup and stdin-only store', () => {
+  const keyHex = 'd340'.repeat(16);
+  const env = { DBUS_SESSION_BUS_ADDRESS: 'unix:path=/test-bus' };
+  const attrs = ['service', VAULT_KEYRING_SERVICE, 'username', VAULT_KEYRING_ACCOUNT];
+  for (const runtime of ['linux', 'wsl']) {
+    const calls = [];
+    let output = `${keyHex}\n`;
+    const backend = createVaultKeyBackend(runtime, env, {
+      execFn(bin, args, opts) {
+        calls.push({ bin, args, opts });
+        if (output instanceof Error) throw output;
+        return output;
+      },
+    });
+    assert.equal(backend.write(keyHex), true);
+    assert.deepEqual(calls[0].args, ['store', `--label=${VAULT_KEYRING_SERVICE}`, ...attrs]);
+    assert.equal(calls[0].opts.input, keyHex);
+    assert.deepEqual(backend.read(), { ok: true, found: true, keyHex, backend: 'secret-tool' });
+    assert.deepEqual(calls[1].args, ['lookup', ...attrs]);
+    assert.equal(backend.remove(), true);
+    assert.deepEqual(calls[2].args, ['clear', ...attrs]);
+    output = Object.assign(new Error(), { status: 1 });
+    assert.deepEqual(backend.read(), { ok: true, found: false, keyHex: '', backend: 'secret-tool' });
+    output = Object.assign(new Error(), { code: 'ENOENT' });
+    assert.deepEqual(backend.read(), { ok: false, found: false, keyHex: '', backend: 'secret-tool' });
+    assert.ok(calls.every(call => call.bin === 'secret-tool' && !call.args.join(' ').includes(keyHex)));
+  }
+});
+
+test('vault key migration verifies read-back before removing the legacy key and preserves the encrypted vault', (t) => {
+  const { paths } = makeSandbox(t);
+  const account = importAccount(paths, { credentialText: makeSampleToken('migrate@example.com') });
+  const originalKey = readFileSync(paths.keyPath, 'utf8');
+  const ciphertext = readFileSync(paths.vaultPath, 'utf8');
+  const keyBackend = mockVaultKeyring();
+  const read = keyBackend.read.bind(keyBackend);
+  keyBackend.read = () => {
+    assert.equal(readFileSync(paths.keyPath, 'utf8'), originalKey);
+    const entry = read();
+    return { ...entry, keyHex: entry.keyHex.toUpperCase() };
+  };
+  const keyringPaths = { ...paths, useKeyring: true };
+  const opts = { runtime: 'win32', keyBackend, useCache: true };
+  t.after(clearVaultKeyCache);
+
+  assert.equal(loadVault(keyringPaths, {}, opts).accounts[0].id, account.id);
+  assert.equal(keyBackend.reads, 2);
+  assert.deepEqual(keyBackend.writes, [originalKey.trim()]);
+  assert.deepEqual(getCachedVaultKeyInfo(keyringPaths, {}, opts), { source: 'keyring', backend: 'python' });
+  assert.equal(existsSync(paths.keyPath), false);
+  assert.equal(readFileSync(paths.vaultPath, 'utf8'), ciphertext);
+  const log = readFileSync(paths.logPath, 'utf8');
+  assert.match(log, /VAULT_KEY_MIGRATED python/);
+  assert.equal(log.includes(originalKey.trim()), false);
+});
+
+test('a second process rechecks the keyring after another process migrates the existing vault key', (t) => {
+  const { paths } = makeSandbox(t);
+  const account = importAccount(paths, { credentialText: makeSampleToken('parallel-migration@example.com') });
+  const originalKey = readFileSync(paths.keyPath, 'utf8').trim();
+  const keyBackend = mockVaultKeyring();
+  const read = keyBackend.read.bind(keyBackend);
+  keyBackend.read = () => {
+    const entry = read();
+    if (keyBackend.reads === 1) {
+      keyBackend.keyHex = originalKey;
+      unlinkSync(paths.keyPath);
+    }
+    return entry;
+  };
+  const keyringPaths = { ...paths, useKeyring: true };
+  const opts = { runtime: 'win32', keyBackend };
+  assert.equal(loadVault(keyringPaths, {}, opts).accounts[0].id, account.id);
+  assert.equal(keyBackend.reads, 2);
+  assert.deepEqual(keyBackend.writes, []);
+  assert.equal(existsSync(paths.keyPath), false);
+});
+
+test('failed keyring writes and failed read-back verification preserve the legacy key byte-for-byte', async (t) => {
+  for (const failure of ['write', 'read-back error', 'read-back mismatch']) {
+    await t.test(failure, (t) => {
+      const { paths } = makeSandbox(t);
+      const account = importAccount(paths, { credentialText: makeSampleToken('fallback@example.com') });
+      const originalKey = readFileSync(paths.keyPath, 'utf8');
+      const originalStat = lstatSync(paths.keyPath);
+      const keyBackend = mockVaultKeyring();
+      keyBackend.write = (hex) => {
+        keyBackend.writes.push(hex);
+        if (failure === 'write') throw new Error(hex);
+        keyBackend.keyHex = 'fe'.repeat(32);
+      };
+      if (failure === 'read-back error') {
+        const read = keyBackend.read.bind(keyBackend);
+        keyBackend.read = () => keyBackend.writes.length ? { ok: false } : read();
+      }
+      const keyringPaths = { ...paths, useKeyring: true };
+      const opts = { runtime: 'win32', keyBackend, useCache: true };
+      t.after(clearVaultKeyCache);
+
+      assert.equal(loadVault(keyringPaths, {}, opts).accounts[0].id, account.id);
+      assert.deepEqual(getCachedVaultKeyInfo(keyringPaths, {}, opts), { source: 'file', backend: 'file' });
+      assert.deepEqual(keyBackend.writes, [originalKey.trim()]);
+      assert.equal(readFileSync(paths.keyPath, 'utf8'), originalKey);
+      assert.equal(lstatSync(paths.keyPath).mtimeMs, originalStat.mtimeMs);
+      assert.equal(lstatSync(paths.keyPath).mode, originalStat.mode);
+      assert.equal(existsSync(paths.logPath), false);
+    });
+  }
+});
+
+test('fresh vault keeps a verified key in the keyring and falls back to a secure file when blocked', async (t) => {
+  for (const mode of ['verified', 'blocked', 'unverified', 'concurrent file']) {
+    await t.test(mode, (t) => {
+      const { paths } = makeSandbox(t);
+      const keyringPaths = { ...paths, useKeyring: true };
+      const keyBackend = mockVaultKeyring();
+      const existingHex = 'c7'.repeat(32);
+      if (mode === 'blocked') keyBackend.read = () => ({ ok: false });
+      if (mode === 'unverified' || mode === 'concurrent file') {
+        keyBackend.write = (hex) => {
+          keyBackend.writes.push(hex);
+          if (mode === 'concurrent file') writeFileSync(paths.keyPath, `${existingHex}\n`, { mode: 0o600 });
+        };
+      }
+      const { key, source, backend } = resolveVaultKey(keyringPaths, {}, { runtime: 'win32', keyBackend });
+      assert.equal(key.length, 32);
+      if (mode === 'verified') {
+        assert.equal(source, 'keyring');
+        assert.equal(backend, 'python');
+        assert.deepEqual(keyBackend.writes, [key.toString('hex')]);
+        assert.equal(keyBackend.reads, 2);
+        assert.equal(existsSync(paths.keyPath), false);
+      } else {
+        assert.equal(source, 'file');
+        assert.equal(backend, 'file');
+        assert.equal(readFileSync(paths.keyPath, 'utf8'), `${key.toString('hex')}\n`);
+        if (process.platform !== 'win32') assert.equal(lstatSync(paths.keyPath).mode & 0o777, 0o600);
+        if (mode === 'concurrent file') assert.equal(key.toString('hex'), existingHex);
+      }
+    });
+  }
+});
+
+test('vault key cache avoids repeated backend reads and never exposes the cached key through metadata', (t) => {
+  const { paths } = makeSandbox(t);
+  const env = { DBUS_SESSION_BUS_ADDRESS: 'unix:path=/test-bus' };
+  const keyringPaths = { ...paths, useKeyring: true };
+  const keyHex = '2d'.repeat(32);
+  const keyBackend = mockVaultKeyring(keyHex);
+  const opts = { keyBackend, useCache: true };
+  t.after(clearVaultKeyCache);
+
+  assert.equal(getVaultKeySource(keyringPaths, env), 'keyring');
+  assert.equal(getVaultKeySource(paths, env), 'file');
+  assert.equal(keyBackend.reads, 0);
+  assert.equal(getCachedVaultKeyInfo(keyringPaths, env), null);
+  saveVault(keyringPaths, { version: 1, accounts: [] }, env, opts);
+  assert.equal(getOrCreateKey(keyringPaths, env, opts).toString('hex'), keyHex);
+  getOrCreateKey(keyringPaths, env, opts).fill(0);
+  assert.deepEqual(loadVault(keyringPaths, env, opts), { version: 1, accounts: [] });
+  assert.deepEqual(getCachedVaultKeyInfo(keyringPaths, env), { source: 'keyring', backend: 'python' });
+  assert.equal(keyBackend.reads, 1);
+  assert.equal(getVaultKeySource(keyringPaths, env), 'keyring');
+  assert.equal(keyBackend.reads, 1);
+  getOrCreateKey(keyringPaths, env, { keyBackend });
+  assert.equal(keyBackend.reads, 2);
+  clearVaultKeyCache();
+  assert.equal(getCachedVaultKeyInfo(keyringPaths, env), null);
+  assert.deepEqual(loadVault(keyringPaths, env, opts), { version: 1, accounts: [] });
+  assert.equal(keyBackend.reads, 3);
+});
+
+test('vault key conflicts preserve the legacy file and select the key that opens the vault', async (t) => {
+  for (const source of ['file', 'keyring', 'duplicate']) {
+    await t.test(source, (t) => {
+      const { paths } = makeSandbox(t);
+      const account = importAccount(paths, { credentialText: makeSampleToken('conflict@example.com') });
+      const originalKey = readFileSync(paths.keyPath, 'utf8');
+      const otherKey = 'be'.repeat(32);
+      const keyringHex = source === 'file' ? otherKey : originalKey.trim();
+      const fileText = source === 'keyring' ? `${otherKey}\n` : originalKey;
+      writeFileSync(paths.keyPath, fileText);
+      const keyBackend = mockVaultKeyring(keyringHex);
+      keyBackend.name = keyringHex;
+      const opts = { runtime: 'win32', keyBackend, useCache: true };
+      const keyringPaths = { ...paths, useKeyring: true };
+      t.after(clearVaultKeyCache);
+
+      assert.equal(loadVault(keyringPaths, {}, opts).accounts[0].id, account.id);
+      assert.equal(getCachedVaultKeyInfo(keyringPaths, {}, opts).source, source === 'file' ? 'file' : 'keyring');
+      const log = readFileSync(paths.logPath, 'utf8');
+      if (source === 'duplicate') {
+        assert.equal(existsSync(paths.keyPath), false);
+        assert.match(log, /VAULT_KEY_CLEANED_DUPLICATE/);
+      } else {
+        assert.equal(readFileSync(paths.keyPath, 'utf8'), fileText);
+        assert.match(log, new RegExp(`VAULT_KEY_CONFLICT_${source.toUpperCase()}_KEPT`));
+      }
+      assert.equal(log.includes(originalKey.trim()), false);
+      assert.equal(log.includes(otherKey), false);
+      assert.deepEqual(keyBackend.writes, []);
+    });
+  }
+});
+
+test('the worker decrypts a switch job after reloading the keyring-backed vault key', async (t) => {
+  const { dataDir, geminiDir } = makeSandbox(t);
+  const env = { ANTIGRAVITY_EXECUTABLE_DATA_DIR: dataDir, SWITCHER_DRY_RUN: '1' };
+  const paths = resolvePaths(env);
+  const keyBackend = mockVaultKeyring('243c'.repeat(16));
+  const opts = { keyBackend, runtime: 'win32', useCache: true };
+  t.after(clearVaultKeyCache);
+
+  const { jobPath } = prepareSwitchJob(paths, {
+    mode: 'new-login', env, keyStoreOpts: opts, tokenStoreOpts: { runtime: 'linux' }, context: { geminiDir },
+  });
+  assert.equal(existsSync(paths.keyPath), false);
+  assert.equal(keyBackend.reads, 1);
+  clearVaultKeyCache();
+  await runWorker(jobPath, env, dataDir, opts);
+  assert.equal(keyBackend.reads, 2);
+  assert.equal(existsSync(paths.keyPath), false);
+  assert.equal(existsSync(jobPath), false);
+  assert.match(readFileSync(paths.logPath, 'utf8'), /DONE mode=new-login DRY_RUN/);
+});
+
+test('sidecar state exposes the vault storage source without exposing the master key', async (t) => {
+  for (const source of ['keyring', 'file']) {
+    await t.test(source, async (t) => {
+      const { env: sandboxEnv } = makeSandbox(t);
+      const env = {
+        ...sandboxEnv,
+        ANTIGRAVITY_GEMINI_DIR: '',
+        DBUS_SESSION_BUS_ADDRESS: 'unix:path=/test-bus',
+        SWITCHER_KEY_STORE: '',
+        SWITCHER_TOKEN_STORE: '',
+      };
+      const uiToken = 'vault-keyring-test';
+      const srv = await createApp({
+        sidecarSdk: createTestSidecarSdk(), env, uiToken,
+        tokenStoreOpts: { runtime: 'win32' },
+        getUserStatus: async () => ({ lsConnected: false }),
+      });
+      t.after(() => srv.close());
+      t.after(clearVaultKeyCache);
+      const getState = () => srv.app.dispatch(new Request('http://127.0.0.1/api/state', {
+        method: 'POST', headers: { 'x-sidecar-token': uiToken }, body: '{}',
+      }));
+
+      assert.equal((await (await getState()).json()).vaultKeySource, 'keyring');
+      assert.equal(existsSync(srv.paths.keyPath), false);
+      const keyBackend = mockVaultKeyring('47fc'.repeat(16));
+      if (source === 'file') keyBackend.read = () => ({ ok: false });
+      const opts = { keyBackend, useCache: true };
+      saveVault(srv.paths, { version: 1, accounts: [] }, env, opts);
+      const keyHex = getOrCreateKey(srv.paths, env, opts).toString('hex');
+
+      const response = await getState();
+      assert.equal(response.status, 200);
+      const body = await response.text();
+      const state = JSON.parse(body);
+      assert.equal(state.vaultKeySource, source);
+      assert.deepEqual(Object.keys(state).filter(key => /vault|key/i.test(key)), ['vaultKeySource']);
+      assert.equal(body.includes(keyHex), false);
+      assert.equal(existsSync(srv.paths.keyPath), source === 'file');
+    });
+  }
+});
+
+test('the UI footer follows the state response and selected language', async () => {
+  const elements = new Map();
+  const events = new Map();
+  const makeElement = () => ({
+    dataset: {},
+    options: [{ value: '10' }],
+    classList: { toggle() {} },
+    setAttribute() {},
+    hasAttribute: () => false,
+    hasChildNodes: () => false,
+    appendChild() {},
+    replaceChildren() {},
+    querySelector: () => null,
+    querySelectorAll: () => [],
+    addEventListener(type, handler) { this[type] = handler; },
+  });
+  let vaultKeySource = 'keyring';
+  const js = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  runInNewContext(js, {
+    window: {
+      addEventListener() {},
+      sidecar: { fetch: async () => ({ ok: true, json: async () => ({ vaultKeySource }) }) },
+    },
+    navigator: { language: 'en' },
+    document: {
+      documentElement: makeElement(),
+      getElementById(id) {
+        if (!elements.has(id)) elements.set(id, makeElement());
+        return elements.get(id);
+      },
+      addEventListener(type, handler) { events.set(type, handler); },
+      createElement: makeElement,
+      createElementNS: makeElement,
+    },
+    getComputedStyle: () => ({ getPropertyValue: () => '' }),
+  }, { contextCodeGeneration: { strings: false, wasm: false } });
+
+  events.get('DOMContentLoaded')();
+  const footer = elements.get('footer-note');
+  assert.equal(footer.textContent, 'AES-256-GCM encrypted locally · Click Switch to back up & relaunch');
+  await new Promise(setImmediate);
+  assert.equal(footer.textContent, 'OS Keyring + AES-256-GCM encrypted · Click Switch to back up & relaunch');
+  elements.get('toggle-lang-btn').click();
+  assert.equal(footer.textContent, '系统凭据库 + AES-256-GCM 本地加密 · 点击「切换」即可自动备份并重启切换账号');
+  vaultKeySource = 'file';
+  elements.get('toggle-reveal-btn').click();
+  await new Promise(setImmediate);
+  assert.equal(footer.textContent, 'AES-256-GCM 本地加密保存 · 点击「切换」即可自动备份并重启切换账号');
+});
 
 test('vault encryption, 0600/0700 permissions, and tamper rejection (fail-close)', (t) => {
   const { geminiDir, paths } = makeSandbox(t);
@@ -1164,7 +1645,7 @@ test('Windows capture distinguishes a blocked read from a missing account and sa
   const { paths } = makeSandbox(t);
   const keyringPaths = { ...paths, useKeyring: true };
   const capture = result => captureCurrentAccount(keyringPaths, {
-    env: {}, tokenStoreOpts: { runtime: 'win32', winKeyringRead: () => result },
+    env: {}, tokenStoreOpts: { runtime: 'win32', winKeyringRead: () => result }, keyStoreOpts: { runtime: 'linux' },
   });
   assert.throws(() => capture({ ok: false, blocked: true }), { message: 'WINDOWS_KEYRING_READ_BLOCKED' });
   assert.throws(() => capture({ ok: true, found: false, raw: '' }), { message: 'NO_ACTIVE_CREDENTIAL' });
@@ -1182,6 +1663,7 @@ test('Windows new-login backs up the keyring session before restart', (t) => {
   const keyringPaths = { ...paths, useKeyring: true };
   const prepare = result => prepareSwitchJob(keyringPaths, {
     mode: 'new-login', env: {}, tokenStoreOpts: { runtime: 'win32', winKeyringRead: () => result },
+    keyStoreOpts: { runtime: 'linux' },
   });
   assert.throws(() => prepare({ ok: false, blocked: true }), { message: 'WINDOWS_KEYRING_READ_BLOCKED' });
   assert.equal(existsSync(paths.backupPath), false);

@@ -709,7 +709,7 @@ export async function resumeConversationAfterRelaunch(
   }
 }
 
-export async function runWorker(jobArg, env = process.env, dataDirArg = '') {
+export async function runWorker(jobArg, env = process.env, dataDirArg = '', keyStoreOpts = {}) {
   if (typeof jobArg !== 'string' || !jobArg) {
     throw new Error('MISSING_JOB_PATH');
   }
@@ -729,7 +729,7 @@ export async function runWorker(jobArg, env = process.env, dataDirArg = '') {
     throw new Error('JOB_NOT_FOUND');
   }
 
-  const key = getOrCreateKey(paths);
+  const key = getOrCreateKey(paths, env, keyStoreOpts);
   let job;
   try {
     const envelope = JSON.parse(readFileSync(resolvedJob, 'utf8'));

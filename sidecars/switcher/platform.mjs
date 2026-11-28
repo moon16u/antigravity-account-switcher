@@ -381,9 +381,11 @@ export function spawnDetachedWorker(
   jobPath,
   env = process.env,
   runtime = detectRuntime(env),
-  { dataDir = '' } = {}
+  { dataDir = '', useKeyring } = {}
 ) {
   const childEnv = { ...env };
+  if (dataDir) childEnv.ANTIGRAVITY_EXECUTABLE_DATA_DIR = dataDir;
+  if (useKeyring === false) childEnv.SWITCHER_KEY_STORE = 'file';
   const windowsHide = runtime === 'win32';
   const tailArgs = dataDir ? [jobPath, dataDir] : [jobPath];
 

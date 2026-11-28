@@ -42,8 +42,8 @@ A cross-platform auxiliary-pane plugin (`SIDECAR_UI_ENTRYPOINT_AUX_PANE`) for **
   - **Floating `View Usage` popover**: hover or click any account's **`View Usage`** bar to inspect its usage in an Antigravity-style Top-Layer floating card with zero layout shift and in-place live refresh.
   - **One-click `Smart Switch`**: ranks backup accounts locally from saved quota snapshots and reset-time projection (falling back to the least-recently-used unsnapshotted backup, zero remote requests) and previews the recommended switch in a confirmation modal.
   - Emails are masked by default with a one-click header toggle to reveal full addresses, alongside instant **`中 / EN`** language switching.
-- **AES-256-GCM Encrypted Vault (No Backup Bloat)**:
-  - Stores saved accounts (`vault.enc.json`), the latest pre-switch safety backup (`last-token.enc.json`), and single-use switch jobs (`jobs/job-<uuid>.enc.json`) encrypted with a local 256-bit key (`vault.key`, `0600` on Unix).
+- **OS Keyring + AES-256-GCM Encrypted Vault (No Backup Bloat)**:
+  - Encrypts saved accounts (`vault.enc.json`), the latest pre-switch safety backup (`last-token.enc.json`), and single-use switch jobs (`jobs/job-<uuid>.enc.json`) with a 256-bit AES-GCM master key stored in your **OS Keyring** (**Windows Credential Manager**, **macOS Keychain**, or **Linux / WSL2 Secret Service** when D-Bus is available), with verified automatic migration from legacy `vault.key` files and safe `0600` file fallback on headless / default WSL2 environments.
   - Switching accounts deduplicates and updates the active account in place inside `vault.enc.json`, overwrites the single `last-token.enc.json` file atomically, and deletes each one-time job file immediately on pickup — so repeated switching never accumulates leftover backup files.
 - **Adaptive Safe Shutdown & Relaunch**:
   - Runs switches in a detached worker (`--detach-worker` double-fork on native Windows; `systemd-run --user --scope` on Linux/WSL2) so restarting Antigravity never kills the switch mid-flight.
@@ -51,7 +51,7 @@ A cross-platform auxiliary-pane plugin (`SIDECAR_UI_ENTRYPOINT_AUX_PANE`) for **
   - **Active-Work Guard**: checks running conversations, background tasks, terminals, and user child processes before closing the desktop app, pausing with **Recheck & Switch**, **Cancel**, or audited **Force Switch** (`FORCE_SWITCH_REQUESTED`).
 - **Event-Driven Quota Alerts, MCP Tools & Hard Agent Permission Gate**:
   - **Conversation-driven monitoring**: `PostInvocation` (`hooks.json` → `scripts/quota-hook.mjs`) writes a throttled local trigger file watched by the Sidecar via `fs.watch`, updating `quota-alert.json` only during active conversations (zero idle requests). `PreInvocation` reads the local snapshot in milliseconds and injects per-conversation, per-level alerts (**`soft`** wrap-up reminder → **`hard`** switch alert) using per-session jittered thresholds (`dynamicThresholdEnabled`, default on).
-  - **Bundled stdio MCP server (`0.6.1`) & `/switch-account` skill**: exposes `get_switcher_status`, `list_accounts`, `get_quota` (live local RPC for active account, local snapshot projection for inactive accounts), and `switch_account` (`pickBest: true` ranks from local snapshots with least-recently-used unsnapshotted fallback).
+  - **Bundled stdio MCP server (`0.7.0`) & `/switch-account` skill**: exposes `get_switcher_status`, `list_accounts`, `get_quota` (live local RPC for active account, local snapshot projection for inactive accounts), and `switch_account` (`pickBest: true` ranks from local snapshots with least-recently-used unsnapshotted fallback).
   - **Hard Permission Gate (`Agent Autonomous Switch`, default OFF)**:
     - When **OFF**, the Agent is strictly **read-only** (status, quota, low-quota reminders). Calling `switch_account` fails closed at the MCP server with `AGENT_SWITCH_DISABLED`, and **Auto-Resume After Switch** is automatically turned off and greyed out in the UI.
     - When **ON**, the Agent is authorized to switch on request or at the low-quota hard floor (still protected by the active-work guard), and **Auto-Resume After Switch** can be toggled independently to resume your conversation after restart once the new backend is ready.
@@ -126,12 +126,13 @@ A cross-platform auxiliary-pane plugin (`SIDECAR_UI_ENTRYPOINT_AUX_PANE`) for **
 | `ANTIGRAVITY_APP_STORAGE_PATH` | Overrides the path to `app_storage.json` (`runInBackground` detection and opt-in onboarding sync). |
 | `ANTIGRAVITY_WIN_APPDATA` / `ANTIGRAVITY_WIN_LOCALAPPDATA` | Overrides Windows `%APPDATA%` / `%LOCALAPPDATA%` paths under WSL2 when auto-detection is unavailable. |
 | `ANTIGRAVITY_GEMINI_DIR` / `ANTIGRAVITY_EXECUTABLE_DATA_DIR` | Overrides `~/.gemini` and the encrypted runtime data directory. |
+| `SWITCHER_KEY_STORE` | Set to `file` to force local `0600` `vault.key` file storage instead of OS Keyring master-key storage. |
 
 ## Runtime Data Directory
 
 Runtime data is isolated from plugin source files under `~/.gemini/antigravity/sidecar_data/antigravity-account-switcher/switcher/data/` (Windows: `%USERPROFILE%\.gemini\antigravity\sidecar_data\antigravity-account-switcher\switcher\data\`; standalone fallback: `~/.gemini/antigravity/plugin_data/antigravity-account-switcher/`):
 
-- `vault.key` — Local 256-bit random master key (`0600` on Unix)
+- `vault.key` — Fallback 256-bit random master key (`0600` on Unix; used only when OS Keyring is unavailable, such as default WSL2 or headless Linux — automatically verified, migrated into OS Keyring, wiped, and removed on Windows / macOS / D-Bus Linux)
 - `vault.enc.json` — AES-256-GCM encrypted saved accounts, deduplicated by email (`0600` on Unix)
 - `last-token.enc.json` — Single-file encrypted pre-switch backup, atomically overwritten on each switch (`0600` on Unix)
 - `jobs/job-<uuid>.enc.json` — Single-use encrypted switch job, deleted immediately when picked up
@@ -146,7 +147,7 @@ Runtime data is isolated from plugin source files under `~/.gemini/antigravity/s
 
 - **Auth Gate & Rate Limits**: Every Sidecar API requires the host-injected `ANTIGRAVITY_SIDECAR_UI_TOKEN` (`403` when missing), enforces sliding-window rate limits (`60/min` reads, `30/min` usage, `25/min` settings with `Retry-After`, `10/min` heavy writes), and guards switches with a `15s` lock.
 - **Strict CSP & DOM-Safe UI**: Serves strict `Content-Security-Policy`, `X-Content-Type-Options: nosniff`, `Cache-Control: no-store`, `Referrer-Policy: no-referrer`, and `Permissions-Policy`. The frontend builds DOM nodes exclusively via `textContent` and `createElement` (zero `innerHTML`, `eval`, or inline scripts/styles).
-- **Authenticated Encryption & Local Threat Model**: Every encrypted envelope uses AES-256-GCM with a fresh 12-byte IV and 16-byte auth tag; any tampering fails decryption. Note that to avoid master-password prompts on every switch, `vault.key` is stored locally alongside `vault.enc.json` (`0600` on Unix) — this prevents cross-user reads and accidental repo leaks, but cannot defend against malware or rogue processes already running with full same-user permissions.
+- **OS Keyring Envelope Encryption & Local Threat Model**: Every encrypted envelope uses AES-256-GCM with a fresh 12-byte IV and 16-byte auth tag; any tampering fails decryption. On Windows, macOS, and D-Bus desktop Linux, the 256-bit master key is stored in the OS Keyring (`antigravity-account-switcher:vault-key`) rather than alongside `vault.enc.json` on disk, with secrets passed strictly over `stdin` (never CLI arguments), in-process memory caching, and mandatory read-back verification before wiping any legacy `vault.key` file. This defends against directory exfiltration, accidental cloud sync, and cross-user reads; as with all passwordless desktop keyrings, it cannot defend against malware already running with full same-user permissions. On environments without an OS Keyring (such as default WSL2), it falls back cleanly to a `0600` `vault.key` file.
 - **Prompt-Injection Hardening on Auto-Resume**: MCP `switch_account` does not accept arbitrary agent-supplied resume prompts; when **Auto-Resume After Switch** is enabled, the worker always sends a fixed, benign wakeup message to prevent indirect prompt injection from persisting across account switches.
 - **Filesystem & Process Hardening**: Rejects symlinks (`lstatSync`), enforces directory containment (`assertInsideDir`), writes atomically via temp file + `renameSync`, strips prototype-pollution keys, invokes subprocesses via argument arrays only (never `shell: true`), and strips command-line arguments from active-work reports.
 - **Native Windows Credential Handling**: Uses Python `ctypes` `CredReadW` on demand, falling back to plain `pwsh` / `powershell.exe -Command` without `-WindowStyle Hidden` or `-EncodedCommand`, and stops before restart if backup fails.
@@ -154,20 +155,21 @@ Runtime data is isolated from plugin source files under `~/.gemini/antigravity/s
 
 ## Repository Structure
 
-- `plugin.json` — Plugin manifest (`antigravity-account-switcher`, `0.6.1`)
-- `mcp_config.json` / `scripts/mcp-server.mjs` — Bundled zero-dependency stdio MCP server (`0.6.1`)
+- `plugin.json` — Plugin manifest (`antigravity-account-switcher`, `0.7.0`)
+- `mcp_config.json` / `scripts/mcp-server.mjs` — Bundled zero-dependency stdio MCP server (`0.7.0`)
 - `hooks.json` / `scripts/quota-hook.mjs` — Lightweight `PreInvocation` & `PostInvocation` hooks
 - `skills/switch-account/SKILL.md` — `/switch-account` agent workflow skill
 - `sidecars/switcher/main.mjs` — Sidecar HTTP server, `fs.watch` event-driven quota refresh, security gates & rate limits
 - `sidecars/switcher/quota-snapshots.mjs` — Local quota snapshot store, active-account LS query & reset-time projection
 - `sidecars/switcher/quota-guard.mjs` — Soft/hard threshold evaluation, dynamic jitter, natural pause, backup ranking & hub discovery
+- `sidecars/switcher/key-store.mjs` — OS Keyring vault master-key storage (Windows Credential Manager, macOS Keychain, Linux Secret Service), stdin-only writes, verified migration & file fallback
 - `sidecars/switcher/vault.mjs` — AES-256-GCM vault, atomic writes & switch job preparation
 - `sidecars/switcher/token-store.mjs` — Cross-platform credential storage (macOS Keychain, Linux Secret Service, on-demand Windows Credential Manager + `cmdkey.exe`, WSL2 file store)
 - `sidecars/switcher/platform.mjs` — Runtime detection, path translation, desktop relaunch & opt-in onboarding sync
 - `sidecars/switcher/active-work.mjs` — Pre-switch loopback RPC & user child-process guard
 - `sidecars/switcher/switcher-worker.mjs` — Detached switch, native sign-in & desktop restart worker
 - `sidecars/switcher/public/` — Auxiliary-pane UI (`index.html`, `app.js`, `styles.css`, and offline `fonts/GoogleSans-Latin.woff2` under `OFL-1.1`)
-- `sidecars/switcher/test/` — Isolated unit & integration test suites (`63` tests across `switcher.test.mjs` and `mcp-and-hook.test.mjs`)
+- `sidecars/switcher/test/` — Isolated unit & integration test suites (`89` tests across `switcher.test.mjs` and `mcp-and-hook.test.mjs`)
 - `CHANGELOG.md` / `CHANGELOG.zh-CN.md` — Bilingual release changelog
 
 ## Running Tests

@@ -2,6 +2,7 @@ import { createCipheriv, createDecipheriv, randomBytes, randomUUID } from 'node:
 import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { getCachedVaultKeyInfo, resolveVaultKey, shouldUseVaultKeyring } from './key-store.mjs';
 import {
   assertInsideDir,
   assertNotSymlink,
@@ -13,6 +14,7 @@ import {
 } from './token-store.mjs';
 
 export { assertInsideDir, assertNotSymlink, atomicWriteFile, ensureSecureDir, safeChmod };
+export { clearVaultKeyCache } from './key-store.mjs';
 
 export const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MAX_LOG_BYTES = 256 * 1024;
@@ -80,8 +82,10 @@ export function resolvePaths(env = process.env, overrides = {}) {
   const useKeyring = !(
     Boolean(overrides.tokenPath) ||
     Boolean(overrides.geminiDir) ||
+    Boolean(overrides.dataDir) ||
     Boolean(env?.ANTIGRAVITY_GEMINI_DIR) ||
-    env?.SWITCHER_TOKEN_STORE === 'file'
+    env?.SWITCHER_TOKEN_STORE === 'file' ||
+    env?.SWITCHER_KEY_STORE === 'file'
   );
 
   return {
@@ -103,36 +107,33 @@ export function resolvePaths(env = process.env, overrides = {}) {
   };
 }
 
-function parseKeyHex(text) {
-  const hex = String(text || '').trim();
-  if (!/^[0-9a-f]{64}$/i.test(hex)) {
-    throw new Error('INVALID_KEY_FILE');
-  }
-  return Buffer.from(hex, 'hex');
+const VAULT_KEY_BACKENDS = new Set(['python', 'pwsh', 'powershell', 'security', 'secret-tool', 'win32', 'darwin', 'linux', 'wsl']);
+
+export function getOrCreateKey(paths, env = process.env, opts = {}) {
+  return resolveVaultKey(paths, env, {
+    ...opts,
+    canDecrypt(candidateKey) {
+      try {
+        decryptPayload(JSON.parse(readFileSync(paths.vaultPath, 'utf8')), candidateKey);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    onEvent(eventName, backend) {
+      try {
+        const detail = VAULT_KEY_BACKENDS.has(backend) ? backend : 'keyring';
+        appendSwitchLog(paths, eventName, detail);
+      } catch {
+        // A logging failure must not prevent use of the resolved key.
+      }
+    },
+  }).key;
 }
 
-export function getOrCreateKey(paths) {
-  ensureSecureDir(paths.dataDir);
-  if (assertNotSymlink(paths.keyPath)) {
-    return parseKeyHex(readFileSync(paths.keyPath, 'utf8'));
-  }
-  // TODO(security): Local single-user desktop plugin stores its 256-bit AES-GCM key in a mode-0600 file under user home instead of a remote KMS.
-  const key = randomBytes(32);
-  try {
-    writeFileSync(paths.keyPath, key.toString('hex') + '\n', {
-      encoding: 'utf8',
-      mode: 0o600,
-      flag: 'wx',
-    });
-    safeChmod(paths.keyPath, 0o600);
-    return key;
-  } catch (err) {
-    if (err && err.code === 'EEXIST') {
-      assertNotSymlink(paths.keyPath);
-      return parseKeyHex(readFileSync(paths.keyPath, 'utf8'));
-    }
-    throw err;
-  }
+export function getVaultKeySource(paths, env = process.env) {
+  const cached = getCachedVaultKeyInfo(paths, env);
+  return cached?.source ?? (shouldUseVaultKeyring(paths, env) ? 'keyring' : 'file');
 }
 
 export function encryptPayload(obj, key) {
@@ -415,11 +416,11 @@ export function sanitizeActiveState(active, lsUser, { revealEmail = false } = {}
   };
 }
 
-export function loadVault(paths) {
+export function loadVault(paths, env = process.env, keyStoreOpts = {}) {
   if (!assertNotSymlink(paths.vaultPath)) {
     return { version: 1, accounts: [] };
   }
-  const key = getOrCreateKey(paths);
+  const key = getOrCreateKey(paths, env, keyStoreOpts);
   const envelope = JSON.parse(readFileSync(paths.vaultPath, 'utf8'));
   const vault = decryptPayload(envelope, key);
   if (!vault || vault.version !== 1 || !Array.isArray(vault.accounts)) {
@@ -441,15 +442,15 @@ export function loadVault(paths) {
   };
 }
 
-export function saveVault(paths, vault) {
+export function saveVault(paths, vault, env = process.env, keyStoreOpts = {}) {
   ensureSecureDir(paths.dataDir);
-  const key = getOrCreateKey(paths);
+  const key = getOrCreateKey(paths, env, keyStoreOpts);
   const envelope = encryptPayload({ version: 1, accounts: vault.accounts }, key);
   atomicWriteFile(paths.vaultPath, JSON.stringify(envelope, null, 2) + '\n', 0o600);
 }
 
-export function listPublicAccounts(paths, activeEmail, { revealEmails = false, activeTierName = '' } = {}) {
-  const vault = loadVault(paths);
+export function listPublicAccounts(paths, activeEmail, { revealEmails = false, activeTierName = '', env = process.env } = {}) {
+  const vault = loadVault(paths, env);
   const normActive = normalizeEmail(activeEmail);
   const normActiveTier = normalizeTierName(activeTierName);
   const mapped = vault.accounts.map((acc) => {
@@ -511,27 +512,27 @@ function upsertAccountInVault(
   return created;
 }
 
-export function syncActiveAccountTier(paths, { email, tierName } = {}) {
+export function syncActiveAccountTier(paths, { email, tierName, env = process.env } = {}) {
   const normEmail = normalizeEmail(email);
   const normTier = normalizeTierName(tierName);
   if (!normEmail || !normTier || !assertNotSymlink(paths.vaultPath)) {
     return false;
   }
-  const vault = loadVault(paths);
+  const vault = loadVault(paths, env);
   const existing = vault.accounts.find((a) => a.email === normEmail);
   if (!existing || existing.tierName === normTier) {
     return false;
   }
   existing.tierName = normTier;
-  saveVault(paths, vault);
+  saveVault(paths, vault, env);
   return true;
 }
 
-export function updateAccountSyncFields(paths, updates = []) {
+export function updateAccountSyncFields(paths, updates = [], env = process.env) {
   if (!Array.isArray(updates) || updates.length === 0 || !assertNotSymlink(paths.vaultPath)) {
     return 0;
   }
-  const vault = loadVault(paths);
+  const vault = loadVault(paths, env);
   let updatedCount = 0;
 
   for (const u of updates) {
@@ -574,7 +575,7 @@ export function updateAccountSyncFields(paths, updates = []) {
   }
 
   if (updatedCount > 0) {
-    saveVault(paths, vault);
+    saveVault(paths, vault, env);
   }
   return updatedCount;
 }
@@ -589,7 +590,7 @@ function readActiveTokenForSave(paths, env, tokenStoreOpts) {
 
 export function captureCurrentAccount(
   paths,
-  { label = '', fallbackEmail = '', tierName = '', projectId = '', env = process.env, tokenStoreOpts = {} } = {}
+  { label = '', fallbackEmail = '', tierName = '', projectId = '', env = process.env, tokenStoreOpts = {}, keyStoreOpts = {} } = {}
 ) {
   const activeRaw = readActiveTokenForSave(paths, env, tokenStoreOpts);
   if (!activeRaw.present) {
@@ -602,7 +603,7 @@ export function captureCurrentAccount(
   if (!parsed.email) {
     throw new Error('MISSING_ACCOUNT_EMAIL');
   }
-  const vault = loadVault(paths);
+  const vault = loadVault(paths, env, keyStoreOpts);
   const nowIso = new Date().toISOString();
   const entry = upsertAccountInVault(vault, {
     email: parsed.email,
@@ -613,7 +614,7 @@ export function captureCurrentAccount(
     tierName,
     projectId,
   });
-  saveVault(paths, vault);
+  saveVault(paths, vault, env, keyStoreOpts);
   return {
     id: entry.id,
     maskedEmail: maskEmail(entry.email),
@@ -621,12 +622,12 @@ export function captureCurrentAccount(
   };
 }
 
-export function importAccount(paths, { credentialText, label = '', emailOverride = '', tierName = '', projectId = '' } = {}) {
+export function importAccount(paths, { credentialText, label = '', emailOverride = '', tierName = '', projectId = '', env = process.env } = {}) {
   const parsed = parseAndValidateTokenRaw(credentialText, { fallbackEmail: emailOverride });
   if (!parsed.email) {
     throw new Error('MISSING_ACCOUNT_EMAIL');
   }
-  const vault = loadVault(paths);
+  const vault = loadVault(paths, env);
   const nowIso = new Date().toISOString();
   const entry = upsertAccountInVault(vault, {
     email: parsed.email,
@@ -637,7 +638,7 @@ export function importAccount(paths, { credentialText, label = '', emailOverride
     tierName,
     projectId,
   });
-  saveVault(paths, vault);
+  saveVault(paths, vault, env);
   return {
     id: entry.id,
     maskedEmail: maskEmail(entry.email),
@@ -645,19 +646,19 @@ export function importAccount(paths, { credentialText, label = '', emailOverride
   };
 }
 
-export function renameAccount(paths, { id, label }) {
+export function renameAccount(paths, { id, label, env = process.env }) {
   if (typeof id !== 'string' || !UUID_RE.test(id)) {
     throw new Error('INVALID_ACCOUNT_ID');
   }
   const normLabel = normalizeLabel(label);
-  const vault = loadVault(paths);
+  const vault = loadVault(paths, env);
   const entry = vault.accounts.find((a) => a.id === id);
   if (!entry) {
     throw new Error('ACCOUNT_NOT_FOUND');
   }
   entry.label = normLabel;
   entry.updatedAt = new Date().toISOString();
-  saveVault(paths, vault);
+  saveVault(paths, vault, env);
   return {
     id: entry.id,
     maskedEmail: maskEmail(entry.email),
@@ -665,17 +666,17 @@ export function renameAccount(paths, { id, label }) {
   };
 }
 
-export function removeAccount(paths, { id }) {
+export function removeAccount(paths, { id, env = process.env }) {
   if (typeof id !== 'string' || !UUID_RE.test(id)) {
     throw new Error('INVALID_ACCOUNT_ID');
   }
-  const vault = loadVault(paths);
+  const vault = loadVault(paths, env);
   const next = vault.accounts.filter((a) => a.id !== id);
   if (next.length === vault.accounts.length) {
     throw new Error('ACCOUNT_NOT_FOUND');
   }
   vault.accounts = next;
-  saveVault(paths, vault);
+  saveVault(paths, vault, env);
   return { removed: true };
 }
 
@@ -701,6 +702,7 @@ export function prepareSwitchJob(
     fallbackEmail = '',
     env = process.env,
     tokenStoreOpts = {},
+    keyStoreOpts = {},
     context = null,
     delayMs = 0,
     syncOnboarding = false,
@@ -718,8 +720,8 @@ export function prepareSwitchJob(
 
   ensureSecureDir(paths.dataDir);
   ensureSecureDir(paths.jobsDir);
-  const key = getOrCreateKey(paths);
-  const vault = loadVault(paths);
+  const key = getOrCreateKey(paths, env, keyStoreOpts);
+  const vault = loadVault(paths, env, keyStoreOpts);
   const now = new Date();
   const nowIso = now.toISOString();
 
@@ -767,7 +769,7 @@ export function prepareSwitchJob(
     tokenRaw = validatedTarget.rawJson;
   }
 
-  saveVault(paths, vault);
+  saveVault(paths, vault, env, keyStoreOpts);
 
   let cleanContext = null;
   if (context && typeof context === 'object' && !Array.isArray(context)) {
@@ -845,9 +847,9 @@ export function prepareSwitchJob(
   };
 }
 
-export function appendSwitchLog(paths, message) {
+export function appendSwitchLog(paths, message, detail = '') {
   ensureSecureDir(paths.dataDir);
-  const safeMsg = String(message || '').replace(/[\r\n]+/g, ' ').slice(0, 500);
+  const safeMsg = [message, detail].filter(Boolean).join(' ').replace(/[\r\n]+/g, ' ').slice(0, 500);
   const line = `[${new Date().toISOString()}] ${safeMsg}\n`;
   let existing = '';
   if (assertNotSymlink(paths.logPath)) {

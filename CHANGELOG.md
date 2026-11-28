@@ -6,6 +6,20 @@ All notable changes to **Antigravity Account Switcher** are documented in this f
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-11-28
+
+Upgrades local vault encryption to **OS Keyring envelope encryption** (`sidecars/switcher/key-store.mjs`): stores the 256-bit AES-GCM master key in your operating system's native secret store with verified automatic migration and safe file fallback.
+
+### Added
+
+- **OS Keyring master key storage** (`sidecars/switcher/key-store.mjs`): stores the 256-bit vault key in **Windows Credential Manager** (`CredWriteW` / `CredReadW` via Python `ctypes` primary with plain non-hidden `pwsh` / `powershell.exe` fallback), **macOS Keychain** (`/usr/bin/security`), or **Linux / WSL2 Secret Service** (`secret-tool` when `DBUS_SESSION_BUS_ADDRESS` is set). All secrets pass strictly over `stdin` (never in CLI arguments), and each process caches the key in memory after a single read.
+- **Verified automatic migration & safe fallback**: existing `vault.key` files migrate automatically on first read — the switcher writes to the OS Keyring, reads back to verify byte-for-byte equality, and only then wipes and removes the legacy plaintext file (logging `VAULT_KEY_MIGRATED`). If the keyring is unavailable, blocked, or disagrees with an existing encrypted vault, it preserves `vault.key` intact and falls back safely to `0600` file storage (with `SWITCHER_KEY_STORE=file` available as an explicit override).
+- **Footer storage indicator & expanded tests**: `/api/state` exposes only a sanitized `vaultKeySource` (`'keyring'` or `'file'`) reflected in the sidebar footer, detached workers inherit the storage mode cleanly, and isolated tests grow to **89 passing tests**.
+
+### Changed
+
+- **CI maintenance**: upgraded GitHub Actions workflow steps to `actions/checkout@v5` and `actions/setup-node@v5`.
+
 ## [0.6.1] - 2026-11-28
 
 ### Changed
@@ -111,6 +125,7 @@ Initial open-source release.
 
 - Fixed macOS `runInBackground` default test assertion and canonical positive DER certificate serial generation in CI (`a9e3bd3`).
 
+[0.7.0]: https://github.com/moon16u/antigravity-account-switcher/releases/tag/v0.7.0
 [0.6.1]: https://github.com/moon16u/antigravity-account-switcher/releases/tag/v0.6.1
 [0.6.0]: https://github.com/moon16u/antigravity-account-switcher/releases/tag/v0.6.0
 [0.5.0]: https://github.com/moon16u/antigravity-account-switcher/releases/tag/v0.5.0

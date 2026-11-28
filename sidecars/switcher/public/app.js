@@ -123,6 +123,7 @@
       logsSummary: '最近切换日志',
       noLogs: '暂无记录',
       footerNote: 'AES-256-GCM 本地加密保存 · 点击「切换」即可自动备份并重启切换账号',
+      footerNoteKeyring: '系统凭据库 + AES-256-GCM 本地加密 · 点击「切换」即可自动备份并重启切换账号',
       errRequestFailed: '请求失败（HTTP {status}）',
       errReadState: '读取账号状态失败',
       errActionFailed: '操作失败',
@@ -233,6 +234,7 @@
       logsSummary: 'Recent Switch Logs',
       noLogs: 'No logs yet',
       footerNote: 'AES-256-GCM encrypted locally · Click Switch to back up & relaunch',
+      footerNoteKeyring: 'OS Keyring + AES-256-GCM encrypted · Click Switch to back up & relaunch',
       errRequestFailed: 'Request failed (HTTP {status})',
       errReadState: 'Failed to load account status',
       errActionFailed: 'Operation failed',
@@ -727,7 +729,7 @@
     return btn;
   }
 
-  function applyStaticI18n() {
+  function applyStaticText() {
     document.documentElement.lang = state.lang === 'en' ? 'en' : 'zh-CN';
     document.title = t('pageTitle');
     el('app-title').textContent = t('pageTitle');
@@ -785,7 +787,7 @@
     }
 
     el('logs-summary').textContent = t('logsSummary');
-    el('footer-note').textContent = t('footerNote');
+    el('footer-note').textContent = state.data?.vaultKeySource === 'keyring' ? t('footerNoteKeyring') : t('footerNote');
   }
 
   function formatActiveWorkKind(kind) {
@@ -1273,17 +1275,18 @@
   }
 
   function render() {
-    applyStaticI18n();
+    applyStaticText();
     renderHeaderAndUnsavedBanner(state.data);
     renderAccountsSection(state.data);
     renderGuardSettings();
     renderLogs(state.data);
     renderConfirmDialog(state.data);
+    el('footer-note').textContent = state.data?.vaultKeySource === 'keyring' ? t('footerNoteKeyring') : t('footerNote');
   }
 
   async function refreshState(silent = false) {
     state.loadingState = true;
-    applyStaticI18n();
+    applyStaticText();
     renderGuardSettings();
     try {
       const data = await apiPost('/api/state');
@@ -1435,7 +1438,7 @@
     if (state.refreshing) return;
     state.refreshing = true;
     showNotice('');
-    applyStaticI18n();
+    applyStaticText();
     renderGuardSettings();
     const startedAt = Date.now();
     try {
@@ -1455,7 +1458,7 @@
         await new Promise((r) => setTimeout(r, 320 - elapsed));
       }
       state.refreshing = false;
-      applyStaticI18n();
+      applyStaticText();
       renderGuardSettings();
     }
   }

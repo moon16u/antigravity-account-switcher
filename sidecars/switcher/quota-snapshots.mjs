@@ -240,7 +240,7 @@ export function createQuotaService({
     id, activeAccountId = '', activeEmail = '', lsConnected = false, tierName = '', forceRefresh = false, syncSource = 'ui',
   } = {}) {
     if (typeof id !== 'string' || !UUID_RE.test(id)) throw new Error('INVALID_ACCOUNT_ID');
-    const acc = loadVault(paths).accounts.find((entry) => entry.id === id);
+    const acc = loadVault(paths, env).accounts.find((entry) => entry.id === id);
     if (!acc) throw new Error('ACCOUNT_NOT_FOUND');
     const isActive = Boolean(
       (activeAccountId && id === activeAccountId) || (activeEmail && acc.email === normalizeEmail(activeEmail))

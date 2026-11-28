@@ -42,8 +42,8 @@
   - **原生悬浮「查看用量」卡片**：悬停或点击每张账号卡底部的「**查看用量**」，以 Antigravity 原生风格悬浮卡片展示分组额度与圆环进度，零页面位移且支持原地刷新。
   - **一键「智能切换」**：完全基于本地配额快照与重置倒计时推算挑选最优备用号（无快照时回退至最久未用备用号，零远端请求），并在确认弹窗中预览推荐账号与预计余量。
   - 邮箱默认脱敏展示，顶部支持一键显示/隐藏完整邮箱与 **`中 / EN`** 实时切换。
-- **AES-256-GCM 静态加密（无备份文件堆积）**：
-  - 使用本机随机生成的 256 位主密钥（`vault.key`，Unix 下 `0600`）加密保存账号库（`vault.enc.json`）、切号前安全备份（`last-token.enc.json`）及一次性切号任务（`jobs/job-<uuid>.enc.json`）。
+- **系统凭据库 + AES-256-GCM 信封加密（无备份文件堆积）**：
+  - 使用 256 位随机 AES-GCM 主密钥加密保存账号库（`vault.enc.json`）、切号前安全备份（`last-token.enc.json`）及一次性切号任务（`jobs/job-<uuid>.enc.json`）；在 **Windows（凭据管理器）**、**macOS（钥匙串）** 与 **桌面 Linux / 带 D-Bus 的 WSL2（Secret Service）** 下，主密钥自动托管于操作系统原生凭据库（支持老版本 `vault.key` 强校验自动迁移），无 Keyring 环境（如默认 WSL2）自动安全回退至 `0600` 本地密钥文件。
   - 每次切号会按邮箱原地更新 `vault.enc.json` 中的最新凭证（绝不生成重复账号条目），原子覆盖唯一的 `last-token.enc.json`，一次性任务文件被读取后立即删除，反复切号也不会堆积冗余备份文件。
 - **自适应优雅重启与活跃任务护栏**：
   - 通过脱离进程树的独立执行器（Windows 原生纯 Node 双派生 `--detach-worker`；Linux/WSL2 优先 `systemd-run --user --scope`）执行切号，确保关闭桌面端应用时不会中断切换流程。
@@ -51,7 +51,7 @@
   - **切号前活跃任务护栏**：自动检测运行中的对话、后台任务、活跃终端与用户子进程，有任务运行时暂停并给出「重新检查并切换」「取消」与记入审计日志（`FORCE_SWITCH_REQUESTED`）的「仍要强制切换」。
 - **事件驱动低额度提醒、MCP 工具与「Agent 自主切号」硬权限门禁**：
   - **随对话周期触发**：`PostInvocation` Hook（`hooks.json` → `scripts/quota-hook.mjs`）写入节流触发文件，Sidecar 通过 `fs.watch` 监听并异步更新本地 `quota-alert.json`，空闲挂机严格零请求。`PreInvocation` Hook 毫秒级读取本地快照，按会话动态浮动阈值（`dynamicThresholdEnabled`，默认开启）分级去重注入提醒（**`soft`** 软性收尾提醒 → **`hard`** 硬下限提醒）。
-  - **内置零依赖 stdio MCP 服务（`0.6.1`）与 `/switch-account` 技能**：提供 `get_switcher_status`、`list_accounts`、`get_quota`（活跃账号实时本地 RPC，非活跃账号本地快照推算）与 `switch_account`（`pickBest: true` 基于本地快照挑选最优备用号，无快照时回退至最久未用备用号）。
+  - **内置零依赖 stdio MCP 服务（`0.7.0`）与 `/switch-account` 技能**：提供 `get_switcher_status`、`list_accounts`、`get_quota`（活跃账号实时本地 RPC，非活跃账号本地快照推算）与 `switch_account`（`pickBest: true` 基于本地快照挑选最优备用号，无快照时回退至最久未用备用号）。
   - **「Agent 自主切号」硬权限开关（默认关闭）**：
     - **关闭时**：Agent 仅具备**只读权限**（查询状态、额度与提醒）；MCP 服务层对 `switch_account` 执行 fail-closed 硬拒绝并返回 `AGENT_SWITCH_DISABLED`，同时「**切号后自动续跑**」自动关闭并在界面中置灰禁用。
     - **开启时**：授权 Agent 在低额度硬下限或用户指令下自主切号（仍受活跃任务护栏约束），「**切号后自动续跑**」也可独立开关，在桌面端应用重启就绪后自动唤醒当前会话继续任务。
@@ -126,12 +126,13 @@
 | `ANTIGRAVITY_APP_STORAGE_PATH` | 覆盖 `app_storage.json` 路径（用于读取 `runInBackground` 及可选引导记录同步）。 |
 | `ANTIGRAVITY_WIN_APPDATA` / `ANTIGRAVITY_WIN_LOCALAPPDATA` | 在非标准 WSL2 环境下覆盖 Windows `%APPDATA%` / `%LOCALAPPDATA%` 路径解析。 |
 | `ANTIGRAVITY_GEMINI_DIR` / `ANTIGRAVITY_EXECUTABLE_DATA_DIR` | 覆盖 `~/.gemini` 与 Sidecar 运行时加密数据目录。 |
+| `SWITCHER_KEY_STORE` | 设为 `file` 可强制使用本地 `0600` `vault.key` 文件存储，禁用系统凭据库主密钥托管。 |
 
 ## 运行时数据目录
 
 运行时数据与插件源码完全隔离，默认位于 `~/.gemini/antigravity/sidecar_data/antigravity-account-switcher/switcher/data/`（Windows 为 `%USERPROFILE%\.gemini\antigravity\sidecar_data\antigravity-account-switcher\switcher\data\`；独立运行回退至 `~/.gemini/antigravity/plugin_data/antigravity-account-switcher/`）：
 
-- `vault.key` — 本机随机 256 位 AES 主密钥（Unix 下 `0600`）
+- `vault.key` — 回退用 256 位随机 AES 主密钥（Unix 下 `0600`；仅在无系统凭据库环境如默认 WSL2 或无头 Linux 下使用；在 Windows / macOS / 桌面 Linux 下会自动校验迁移进系统凭据库并覆写删除）
 - `vault.enc.json` — AES-256-GCM 加密账号库，按邮箱原地更新去重（Unix 下 `0600`）
 - `last-token.enc.json` — 切号前活跃凭证单文件紧急备份，每次原子覆盖不堆积（Unix 下 `0600`）
 - `jobs/job-<uuid>.enc.json` — 一次性加密切号任务，执行器读取后立即删除
@@ -146,7 +147,7 @@
 
 - **鉴权与分级限流**：所有接口强制校验宿主注入的 `ANTIGRAVITY_SIDECAR_UI_TOKEN`（缺失时 `403` 拒绝），启用滑动窗口限流（读 `60 次/分`、用量 `30 次/分`、高级设置 `25 次/分` 并返回 `Retry-After`、重型写操作 `10 次/分`）与 `15 秒` 切号互斥锁。
 - **严格 CSP 与无注入前端**：附带严格 `Content-Security-Policy`、`X-Content-Type-Options: nosniff`、`Cache-Control: no-store`、`Referrer-Policy: no-referrer` 与 `Permissions-Policy` 响应头；前端全部使用 `textContent` 与标准 DOM API 构建，零 `innerHTML`、零 `eval`、零内联脚本与样式。
-- **加密完整性校验与本地威胁边界**：每条密文使用 AES-256-GCM 配合唯一 12 字节随机 IV 与 16 字节认证标签，任何篡改直接拒绝解密。为避免每次切号弹出主密码输入框，`vault.key` 与 `vault.enc.json` 同目录以 `0600` 权限保存在本地——这可防范跨用户读取与误提交泄露，但无法抵御已在本机获得同用户完整执行权限的恶意软件。
+- **OS Keyring 信封加密与本地威胁边界**：每条密文使用 AES-256-GCM 配合唯一 12 字节随机 IV 与 16 字节认证标签，任何篡改直接拒绝解密。在 Windows、macOS 与带 D-Bus 的桌面 Linux 下，256 位主密钥托管于系统原生凭据库（`antigravity-account-switcher:vault-key`）而非与 `vault.enc.json` 同目录明文落盘；密钥写入全程经 `stdin` 传递（绝不进入命令行参数），单进程内做内存缓存，老用户迁移强制回读比对一致后才覆写清理旧 `vault.key`。这可有效防范目录打包泄露、云盘误同步与跨用户读取；不过与所有免主密码的桌面凭据库一样，无法抵御已在本机获得同用户完整执行权限的恶意软件。无系统凭据库环境（如默认 WSL2）自动安全回退至 `0600` `vault.key` 文件。
 - **自动续跑防提示词注入加固**：MCP `switch_account` 不接受 Agent 传入任意自定义续跑文本；开启「切号后自动续跑」时始终使用内置固定良性唤醒语，防止间接 Prompt 注入借切号重启在新账号会话中持久化执行指令。
 - **文件系统与进程加固**：拒绝敏感路径符号链接（`lstatSync`）、校验目录边界（`assertInsideDir`）、临时文件 + `renameSync` 原子写入、过滤原型链污染键；子进程调用一律使用参数数组（禁用 `shell: true`），活跃子进程提示仅显示可执行文件名与 PID，不泄露命令行参数。
 - **Windows 原生凭据读取**：按需通过 Python `ctypes` 调用 `CredReadW`，不可用时依次回退至普通 `pwsh` / `powershell.exe -Command`（绝不使用 `-WindowStyle Hidden` 或 `-EncodedCommand`）；若备份读取失败会在重启前中止操作。
@@ -154,20 +155,21 @@
 
 ## 仓库结构
 
-- `plugin.json` — 插件清单（`antigravity-account-switcher`，`0.6.1`）
-- `mcp_config.json` / `scripts/mcp-server.mjs` — 内置零依赖 stdio MCP 服务（`0.6.1`）
+- `plugin.json` — 插件清单（`antigravity-account-switcher`，`0.7.0`）
+- `mcp_config.json` / `scripts/mcp-server.mjs` — 内置零依赖 stdio MCP 服务（`0.7.0`）
 - `hooks.json` / `scripts/quota-hook.mjs` — 轻量事件驱动 `PreInvocation` / `PostInvocation` Hook
 - `skills/switch-account/SKILL.md` — 面向 Agent 的 `/switch-account` 技能工作流
 - `sidecars/switcher/main.mjs` — Sidecar HTTP 服务、`fs.watch` 触发刷新、安全门禁与限流
 - `sidecars/switcher/quota-snapshots.mjs` — 本地配额快照存储、活跃账号本地查询与重置推算
 - `sidecars/switcher/quota-guard.mjs` — 软/硬阈值判定、动态抖动、自然停顿、备用号排序与活跃 Hub 探测
+- `sidecars/switcher/key-store.mjs` — 系统凭据库主密钥托管（Windows 凭据管理器、macOS 钥匙串、Linux Secret Service）、stdin 写入、回读校验迁移与文件回退
 - `sidecars/switcher/vault.mjs` — AES-256-GCM 凭据库、原子写入与切号任务构造
 - `sidecars/switcher/token-store.mjs` — 跨平台凭据读写层（macOS Keychain、Linux Secret Service、Windows 按需读取与 `cmdkey.exe` 交接、WSL2 文件存储）
 - `sidecars/switcher/platform.mjs` — 运行时检测、路径转换、桌面端重启与可选引导同步
 - `sidecars/switcher/active-work.mjs` — 切号前回环 RPC 与用户子进程检测护栏
 - `sidecars/switcher/switcher-worker.mjs` — 脱离进程树的独立切号、原生登录与桌面端重启执行器
 - `sidecars/switcher/public/` — 侧栏 Web UI（`index.html`、`app.js`、`styles.css` 及离线 `fonts/GoogleSans-Latin.woff2`，`OFL-1.1`）
-- `sidecars/switcher/test/` — 全隔离单元与集成测试套件（共 `63` 项，覆盖 `switcher.test.mjs` 与 `mcp-and-hook.test.mjs`）
+- `sidecars/switcher/test/` — 全隔离单元与集成测试套件（共 `89` 项，覆盖 `switcher.test.mjs` 与 `mcp-and-hook.test.mjs`）
 - `CHANGELOG.md` / `CHANGELOG.zh-CN.md` — 中英文双语更新日志
 
 ## 运行测试
